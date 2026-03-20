@@ -2,11 +2,11 @@
   <img src="https://raw.githubusercontent.com/aipartnerup/apcore-toolkit/main/apcore-toolkit-logo.svg" alt="apcore-toolkit logo" width="200"/>
 </div>
 
-# apcore-toolkit-rust
+# apcore-toolkit
 
-Rust implementation of the [apcore-toolkit](https://github.com/aipartnerup/apcore-toolkit).
+Rust toolkit for building [APCore](https://github.com/aipartnerup/apcore-rust) framework integrations. Scan web framework endpoints (Axum, Actix, Rocket, etc.), extract JSON Schemas, infer behavioral annotations, and output APCore-compatible module definitions — as YAML binding files, direct registry entries, or HTTP proxy modules.
 
-Shared scanner, schema extraction, and output toolkit for apcore framework adapters. Ported from [apcore-toolkit-python](https://github.com/aipartnerup/apcore-toolkit-python) v0.3.0.
+If you're building an APCore adapter for a Rust web framework, this crate provides all the shared infrastructure so you only need to write the framework-specific scanning logic.
 
 ## Installation
 
