@@ -2,9 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [0.3.1] - 2026-03-22
+
+### Changed
+- Rebrand: aipartnerup → aiperceivable
+
 ## [0.3.0] - 2026-03-20
 
-Initial release. Rust port of [apcore-toolkit-python](https://github.com/aipartnerup/apcore-toolkit-python) v0.3.0.
+Initial release. Rust port of [apcore-toolkit-python](https://github.com/aiperceivable/apcore-toolkit-python) v0.3.0.
 
 ### Added
 

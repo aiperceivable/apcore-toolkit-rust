@@ -1,10 +1,10 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/aipartnerup/apcore-toolkit/main/apcore-toolkit-logo.svg" alt="apcore-toolkit logo" width="200"/>
+  <img src="https://raw.githubusercontent.com/aiperceivable/apcore-toolkit/main/apcore-toolkit-logo.svg" alt="apcore-toolkit logo" width="200"/>
 </div>
 
 # apcore-toolkit
 
-Rust toolkit for building [APCore](https://github.com/aipartnerup/apcore-rust) framework integrations. Scan web framework endpoints (Axum, Actix, Rocket, etc.), extract JSON Schemas, infer behavioral annotations, and output APCore-compatible module definitions — as YAML binding files, direct registry entries, or HTTP proxy modules.
+Rust toolkit for building [APCore](https://github.com/aiperceivable/apcore-rust) framework integrations. Scan web framework endpoints (Axum, Actix, Rocket, etc.), extract JSON Schemas, infer behavioral annotations, and output APCore-compatible module definitions — as YAML binding files, direct registry entries, or HTTP proxy modules.
 
 If you're building an APCore adapter for a Rust web framework, this crate provides all the shared infrastructure so you only need to write the framework-specific scanning logic.
 
@@ -12,10 +12,10 @@ If you're building an APCore adapter for a Rust web framework, this crate provid
 
 ```toml
 [dependencies]
-apcore-toolkit = { git = "https://github.com/aipartnerup/apcore-toolkit-rust" }
+apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust" }
 
 # Optional: HTTP proxy writer
-apcore-toolkit = { git = "https://github.com/aipartnerup/apcore-toolkit-rust", features = ["http-proxy"] }
+apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust", features = ["http-proxy"] }
 ```
 
 ## Core Modules
@@ -196,7 +196,7 @@ let md = to_markdown(&data, &opts).unwrap();
 
 ## Documentation
 
-Full documentation is available at [https://github.com/aipartnerup/apcore-toolkit](https://github.com/aipartnerup/apcore-toolkit).
+Full documentation is available at [https://github.com/aiperceivable/apcore-toolkit](https://github.com/aiperceivable/apcore-toolkit).
 
 ## License
 

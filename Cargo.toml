@@ -5,10 +5,10 @@ edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
 readme = "README.md"
-authors = ["aipartnerup <tercel.yi@gmail.com>"]
-homepage = "https://aipartnerup.com"
-repository = "https://github.com/aipartnerup/apcore-toolkit-rust"
-documentation = "https://github.com/aipartnerup/apcore-toolkit-rust#readme"
+authors = ["aiperceivable <tercel.yi@gmail.com>"]
+homepage = "https://aiperceivable.com"
+repository = "https://github.com/aiperceivable/apcore-toolkit-rust"
+documentation = "https://github.com/aiperceivable/apcore-toolkit-rust#readme"
 keywords = ["apcore", "mcp", "scanner", "schema", "toolkit"]
 categories = [
     "api-bindings",
