@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.4.0] - 2026-03-25
+
+### Added
+
+- **`DisplayResolver`** — sparse `binding.yaml` overlay that resolves surface-facing alias, description, guidance, tags, and documentation into `metadata["display"]`. Supports file/directory binding paths, pre-parsed data, MCP alias sanitization, and CLI alias validation.
+- **`SyntaxVerifier`** — implements `Verifier` trait, checks `.rs` files parse without syntax errors via the `syn` crate.
+- **`deep_resolve_refs()`** — now public API (was internal). Recursively resolves all `$ref` pointers in OpenAPI schemas, depth-limited to 16 levels.
+- **`resolve_target()`** — validates and parses `module_path:qualname` target strings. Returns `ResolvedTarget` with `module_path` and `qualname` fields.
+
+### Fixed
+
+- README: apcore dependency version updated from `>= 0.13.0` to `>= 0.14` (matches Cargo.toml).
+- `docs/API_CONTRACT.md`: Scanner trait updated to async with generic `App` parameter; RegistryWriter `new()` and `with_handler_factory()` constructors added; AIEnhancer::new return type corrected to `AIEnhancerError`.
+
 ## [0.3.1] - 2026-03-22
 
 ### Changed

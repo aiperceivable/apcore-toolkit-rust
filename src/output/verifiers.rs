@@ -8,6 +8,31 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::output::types::{Verifier, VerifyResult};
 
+/// Verify that a Rust source file has valid syntax.
+///
+/// Uses the `syn` crate to parse the file as a Rust source file.
+/// Analogous to `SyntaxVerifier` in Python (which uses `ast.parse`)
+/// and TypeScript (which does a basic readability check).
+pub struct SyntaxVerifier;
+
+impl Verifier for SyntaxVerifier {
+    fn verify(&self, path: &str, _module_id: &str) -> VerifyResult {
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
+        };
+
+        if content.trim().is_empty() {
+            return VerifyResult::fail("File is empty".into());
+        }
+
+        match syn::parse_file(&content) {
+            Ok(_) => VerifyResult::ok(),
+            Err(e) => VerifyResult::fail(format!("Invalid Rust syntax: {e}")),
+        }
+    }
+}
+
 /// Verify that a YAML binding file is parseable and contains required fields.
 pub struct YAMLVerifier;
 
@@ -379,5 +404,70 @@ mod tests {
         let result = run_verifier_chain(&verifiers, "/fake", "test");
         assert!(!result.ok);
         assert_eq!(result.error.as_deref(), Some("first failed"));
+    }
+
+    #[test]
+    fn test_syntax_verifier_valid_rust() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "fn main() {{\n    println!(\"hello\");\n}}").unwrap();
+        let result = SyntaxVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(result.ok, "expected ok, got: {:?}", result.error);
+    }
+
+    #[test]
+    fn test_syntax_verifier_invalid_rust() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "fn main() {{{{{{").unwrap();
+        let result = SyntaxVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Invalid Rust syntax"));
+    }
+
+    #[test]
+    fn test_syntax_verifier_empty_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "").unwrap();
+        let result = SyntaxVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("File is empty"));
+    }
+
+    #[test]
+    fn test_syntax_verifier_nonexistent_file() {
+        let result = SyntaxVerifier.verify("/tmp/nonexistent_rs_file_abc123.rs", "test");
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Cannot read file"));
+    }
+
+    #[test]
+    fn test_syntax_verifier_whitespace_only() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "   \n\n  \t  ").unwrap();
+        let result = SyntaxVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("File is empty"));
+    }
+
+    #[test]
+    fn test_syntax_verifier_complex_valid() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "use std::collections::HashMap;\n\
+             \n\
+             pub struct Foo {{\n\
+                 pub name: String,\n\
+                 pub values: HashMap<String, i32>,\n\
+             }}\n\
+             \n\
+             impl Foo {{\n\
+                 pub fn new(name: String) -> Self {{\n\
+                     Self {{ name, values: HashMap::new() }}\n\
+                 }}\n\
+             }}"
+        )
+        .unwrap();
+        let result = SyntaxVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(result.ok, "expected ok, got: {:?}", result.error);
     }
 }

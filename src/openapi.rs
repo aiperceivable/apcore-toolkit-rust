@@ -43,7 +43,7 @@ pub fn resolve_schema(schema: &Value, openapi_doc: Option<&Value>) -> Value {
 ///
 /// Handles nested `$ref`, `allOf`, `anyOf`, `oneOf`, `items`, and `properties`.
 /// Depth-limited to 16 levels to prevent infinite recursion.
-fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> Value {
+pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> Value {
     if depth > 16 {
         return schema.clone();
     }

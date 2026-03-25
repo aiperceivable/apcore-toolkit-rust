@@ -2,9 +2,11 @@
 // Rust port of apcore-toolkit-python v0.3.0
 
 pub mod ai_enhancer;
+pub mod display;
 pub mod formatting;
 pub mod openapi;
 pub mod output;
+pub mod resolve_target;
 pub mod scanner;
 pub mod schema_utils;
 pub mod serializers;
@@ -12,16 +14,21 @@ pub mod types;
 
 // Re-export primary types at crate root for convenience.
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
+pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::to_markdown;
-pub use openapi::{extract_input_schema, extract_output_schema, resolve_ref, resolve_schema};
+pub use openapi::{
+    deep_resolve_refs, extract_input_schema, extract_output_schema, resolve_ref, resolve_schema,
+};
 pub use output::errors::WriteError;
 pub use output::registry_writer::{HandlerFactory, HandlerFn, RegistryWriter};
 pub use output::types::{Verifier, VerifyResult, WriteResult};
 pub use output::verifiers::{
-    run_verifier_chain, JSONVerifier, MagicBytesVerifier, RegistryVerifier, YAMLVerifier,
+    run_verifier_chain, JSONVerifier, MagicBytesVerifier, RegistryVerifier, SyntaxVerifier,
+    YAMLVerifier,
 };
 pub use output::yaml_writer::YAMLWriter;
 pub use output::{get_writer, OutputFormat};
+pub use resolve_target::{resolve_target, ResolvedTarget};
 pub use scanner::{deduplicate_ids, filter_modules, infer_annotations_from_method, Scanner};
 pub use schema_utils::enrich_schema_descriptions;
 pub use serializers::{annotations_to_value, module_to_value, modules_to_values};

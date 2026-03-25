@@ -39,8 +39,9 @@ pub struct ScannedModule {
 Abstract interface for framework scanners. Equivalent to Python's `BaseScanner` ABC.
 
 ```rust
-pub trait Scanner {
-    fn scan(&self) -> Vec<ScannedModule>;
+#[async_trait]
+pub trait Scanner<App: Send + Sync = ()> {
+    async fn scan(&self, app: &App) -> Vec<ScannedModule>;
     fn source_name(&self) -> &str;
 }
 ```
@@ -158,9 +159,11 @@ impl YAMLWriter {
 ### RegistryWriter
 
 ```rust
-pub struct RegistryWriter;
+pub struct RegistryWriter { /* private fields */ }
 
 impl RegistryWriter {
+    pub fn new() -> Self;
+    pub fn with_handler_factory(factory: HandlerFactory) -> Self;
     pub fn write(
         &self,
         modules: &[ScannedModule],
@@ -170,6 +173,8 @@ impl RegistryWriter {
         verifiers: Option<&[&dyn Verifier]>,
     ) -> Vec<WriteResult>;
 }
+
+impl Default for RegistryWriter { /* ... */ }
 ```
 
 ---
@@ -224,7 +229,7 @@ pub fn extract_input_schema(operation: &serde_json::Value, openapi_doc: Option<&
 pub fn extract_output_schema(operation: &serde_json::Value, openapi_doc: Option<&serde_json::Value>) -> serde_json::Value;
 ```
 
-Internal: `_deep_resolve_refs` with depth limit of 16.
+Public: `deep_resolve_refs(schema, openapi_doc, depth)` — recursively resolves all `$ref` pointers with depth limit of 16.
 
 ---
 
@@ -296,7 +301,7 @@ impl AIEnhancer {
         threshold: Option<f64>,
         batch_size: Option<usize>,
         timeout: Option<u64>,
-    ) -> Result<Self, String>;
+    ) -> Result<Self, AIEnhancerError>;
     pub fn is_enabled() -> bool;           // reads APCORE_AI_ENABLED env var
 }
 
@@ -315,11 +320,62 @@ Environment variables:
 
 ---
 
-## 15. Omitted from Rust Port
+## 15. DisplayResolver (`src/display/resolver.rs`)
+
+```rust
+pub struct DisplayResolver;
+
+impl DisplayResolver {
+    pub fn new() -> Self;
+    pub fn resolve(
+        &self,
+        modules: Vec<ScannedModule>,
+        binding_path: Option<&Path>,
+        binding_data: Option<&Value>,
+    ) -> Result<Vec<ScannedModule>, DisplayResolverError>;
+}
+
+pub enum DisplayResolverError {
+    Validation(String),
+}
+```
+
+Applies sparse `binding.yaml` overlays to resolve surface-facing alias, description, guidance, and tags into `metadata["display"]`. Supports MCP alias auto-sanitization and CLI alias validation.
+
+---
+
+## 16. SyntaxVerifier (`src/output/verifiers.rs`)
+
+```rust
+pub struct SyntaxVerifier;
+
+impl Verifier for SyntaxVerifier {
+    fn verify(&self, path: &str, module_id: &str) -> VerifyResult;
+}
+```
+
+Verifies Rust source files parse without syntax errors using the `syn` crate.
+
+---
+
+## 17. resolve_target (`src/resolve_target.rs`)
+
+```rust
+pub struct ResolvedTarget {
+    pub module_path: String,
+    pub qualname: String,
+}
+
+pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String>;
+```
+
+Validates and parses `module_path:qualname` target strings. Uses the last `:` as separator.
+
+---
+
+## 18. Omitted from Rust Port
 
 - **PythonWriter** — generates Python source code; not applicable to Rust consumers
-- **SyntaxVerifier** — validates Python AST; not applicable
 - **flatten_pydantic_params** — Pydantic-specific; not applicable
-- **resolve_target** — Python import resolution; not applicable
 
 These are Python-language-specific features that have no Rust equivalent.

@@ -42,6 +42,10 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `JSONVerifier` | Verifies JSON files parse correctly |
 | `to_markdown` | Converts JSON objects to Markdown with depth control and table heuristics |
 | `enrich_schema_descriptions` | Merges descriptions into JSON Schema properties |
+| `DisplayResolver` | Sparse binding.yaml overlay — resolves alias, description, guidance, tags into `metadata["display"]` |
+| `SyntaxVerifier` | Verifies Rust source files parse without syntax errors (via `syn`) |
+| `deep_resolve_refs` | Recursively resolves all `$ref` pointers in a JSON Schema (depth-limited to 16) |
+| `resolve_target` | Validates and parses `module_path:qualname` target strings |
 | `get_writer` | Factory function mapping format strings to `OutputFormat` variants |
 
 ## Usage
@@ -185,7 +189,7 @@ let md = to_markdown(&data, &opts).unwrap();
 ## Requirements
 
 - Rust edition 2021
-- apcore >= 0.13.0
+- apcore >= 0.14
 - See `Cargo.toml` for full dependency list
 
 ## Features
