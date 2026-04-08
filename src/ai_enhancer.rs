@@ -322,7 +322,13 @@ impl AIEnhancer {
                 let mut base = module.annotations.clone().unwrap_or_default();
                 let mut any_accepted = false;
 
-                // Boolean fields
+                // Boolean fields enumerated explicitly because Rust has no
+                // runtime reflection over `ModuleAnnotations`. Keep this list
+                // (and `set_bool_annotation` below) in sync with
+                // `apcore::module::ModuleAnnotations`. The integer/string/list
+                // branches further down also need updating when upstream adds
+                // new fields. The `extra` field is intentionally excluded —
+                // it is reserved for adapter extensions, not SLM judgement.
                 let bool_fields = [
                     "readonly",
                     "destructive",
@@ -461,20 +467,20 @@ impl Enhancer for AIEnhancer {
     }
 }
 
-/// Check whether annotations are at their default values (field-by-field comparison).
+/// Check whether annotations are at their default values.
+///
+/// Uses `serde_json` round-trip equality so the comparison automatically
+/// covers any new field added to `apcore::module::ModuleAnnotations` upstream
+/// (including the `extra` extension map). `ModuleAnnotations` does not
+/// implement `PartialEq`, so direct `==` is unavailable.
 fn is_default_annotations(ann: &ModuleAnnotations) -> bool {
-    let d = ModuleAnnotations::default();
-    ann.readonly == d.readonly
-        && ann.destructive == d.destructive
-        && ann.idempotent == d.idempotent
-        && ann.requires_approval == d.requires_approval
-        && ann.open_world == d.open_world
-        && ann.streaming == d.streaming
-        && ann.cacheable == d.cacheable
-        && ann.cache_ttl == d.cache_ttl
-        && ann.cache_key_fields == d.cache_key_fields
-        && ann.paginated == d.paginated
-        && ann.pagination_style == d.pagination_style
+    match (
+        serde_json::to_value(ann),
+        serde_json::to_value(ModuleAnnotations::default()),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Get confidence for an annotation field, checking both `annotations.<field>` and `<field>` keys.
