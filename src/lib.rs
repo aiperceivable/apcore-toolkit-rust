@@ -4,6 +4,7 @@
 pub mod ai_enhancer;
 pub mod display;
 pub mod formatting;
+pub mod http_verb_map;
 pub mod openapi;
 pub mod output;
 pub mod resolve_target;
@@ -16,6 +17,9 @@ pub mod types;
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
 pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::to_markdown;
+pub use http_verb_map::{
+    generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
+};
 pub use openapi::{
     deep_resolve_refs, extract_input_schema, extract_output_schema, resolve_ref, resolve_schema,
 };

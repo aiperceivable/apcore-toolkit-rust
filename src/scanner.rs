@@ -10,6 +10,14 @@ use regex::Regex;
 
 use crate::types::ScannedModule;
 
+// Re-export the HTTP verb mapping helpers so downstream scanner crates
+// can call them through the familiar `scanner` module path, mirroring the
+// relationship between `infer_annotations_from_method` and the scanner
+// module in the other language SDKs.
+pub use crate::http_verb_map::{
+    generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
+};
+
 /// Abstract interface for framework scanners.
 ///
 /// Implementors provide `scan()` for framework-specific endpoint scanning
@@ -343,5 +351,31 @@ mod tests {
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
         assert!(!ann.cacheable);
+    }
+
+    // ---- Integration: re-exported http_verb_map helpers ----
+
+    #[test]
+    fn test_reexport_generate_suggested_alias() {
+        // Callable through the scanner module path.
+        assert_eq!(
+            generate_suggested_alias("/tasks/user_data", "POST"),
+            "tasks.user_data.create"
+        );
+    }
+
+    #[test]
+    fn test_reexport_resolve_http_verb() {
+        assert_eq!(resolve_http_verb("POST", false), "create");
+    }
+
+    #[test]
+    fn test_reexport_has_path_params() {
+        assert!(has_path_params("/tasks/{id}"));
+    }
+
+    #[test]
+    fn test_reexport_scanner_verb_map() {
+        assert_eq!(SCANNER_VERB_MAP.get("POST").copied(), Some("create"));
     }
 }

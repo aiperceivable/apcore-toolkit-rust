@@ -193,11 +193,21 @@ impl DisplayResolver {
         let binding_desc = entry.get("description").and_then(|v| v.as_str());
         let binding_docs = entry.get("documentation").and_then(|v| v.as_str());
 
-        let suggested_alias = module
+        // Resolve suggested_alias from two sources in priority order:
+        //   1. module.suggested_alias (top-level field, preferred)
+        //   2. module.metadata["suggested_alias"] (legacy fallback)
+        // The top-level field takes precedence when set to a non-empty value.
+        let field_alias = module
+            .suggested_alias
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let metadata_alias = module
             .metadata
             .get("suggested_alias")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let suggested_alias = field_alias.or(metadata_alias);
 
         // -- Resolve cross-surface defaults --
         let default_alias = str_or(display_cfg, "alias")
@@ -649,6 +659,85 @@ mod tests {
 
         // suggested_alias should be used instead of module_id
         assert_eq!(display["alias"], "get_user");
+    }
+
+    // ---- Dual-source suggested_alias resolution ----
+
+    #[test]
+    fn test_suggested_alias_field_only() {
+        let resolver = DisplayResolver::new();
+        let mut module = make_module("tasks.user_data.post", "Create");
+        module.suggested_alias = Some("tasks.user_data.create".into());
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.create");
+    }
+
+    #[test]
+    fn test_suggested_alias_metadata_only() {
+        let resolver = DisplayResolver::new();
+        let mut module = make_module("tasks.user_data.post", "Create");
+        module
+            .metadata
+            .insert("suggested_alias".into(), json!("tasks.user_data.legacy"));
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.legacy");
+    }
+
+    #[test]
+    fn test_suggested_alias_field_precedence_over_metadata() {
+        let resolver = DisplayResolver::new();
+        let mut module = make_module("tasks.user_data.post", "Create");
+        module.suggested_alias = Some("tasks.user_data.create".into());
+        module
+            .metadata
+            .insert("suggested_alias".into(), json!("tasks.user_data.legacy"));
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.create");
+    }
+
+    #[test]
+    fn test_suggested_alias_empty_field_falls_through_to_metadata() {
+        let resolver = DisplayResolver::new();
+        let mut module = make_module("tasks.user_data.post", "Create");
+        module.suggested_alias = Some("".into());
+        module
+            .metadata
+            .insert("suggested_alias".into(), json!("tasks.user_data.legacy"));
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.legacy");
+    }
+
+    #[test]
+    fn test_suggested_alias_none_field_falls_through_to_metadata() {
+        let resolver = DisplayResolver::new();
+        let mut module = make_module("tasks.user_data.post", "Create");
+        module.suggested_alias = None;
+        module
+            .metadata
+            .insert("suggested_alias".into(), json!("tasks.user_data.legacy"));
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.legacy");
+    }
+
+    #[test]
+    fn test_suggested_alias_neither_falls_through_to_module_id() {
+        let resolver = DisplayResolver::new();
+        let module = make_module("tasks.user_data.post", "Create");
+        // Neither field nor metadata alias set.
+
+        let resolved = resolver.resolve(vec![module], None, None).unwrap();
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "tasks.user_data.post");
     }
 
     #[test]

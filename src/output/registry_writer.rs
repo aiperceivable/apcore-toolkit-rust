@@ -118,13 +118,20 @@ impl RegistryWriter {
             let fm = self.to_function_module(module);
             // Register with a descriptor
             let descriptor = apcore::registry::registry::ModuleDescriptor {
-                name: module.module_id.clone(),
-                annotations: module.annotations.clone().unwrap_or_default(),
+                module_id: module.module_id.clone(),
+                name: Some(module.module_id.clone()),
+                description: module.description.clone(),
+                documentation: module.documentation.clone(),
                 input_schema: module.input_schema.clone(),
                 output_schema: module.output_schema.clone(),
-                enabled: true,
+                version: module.version.clone(),
                 tags: module.tags.clone(),
+                annotations: module.annotations.clone(),
+                examples: module.examples.clone(),
+                metadata: module.metadata.clone(),
+                sunset_date: None,
                 dependencies: vec![],
+                enabled: true,
             };
             if let Err(e) = registry.register(&module.module_id, Box::new(fm), descriptor) {
                 results.push(WriteResult::failed(

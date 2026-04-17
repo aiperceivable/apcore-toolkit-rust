@@ -33,6 +33,12 @@ pub struct ScannedModule {
     /// Full docstring text for rich descriptions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
+    /// Scanner-generated human-friendly alias used by surface adapters in
+    /// the resolve chain before falling back to module_id. Scanners SHOULD
+    /// set this using `generate_suggested_alias()` when the source endpoint
+    /// has HTTP route information. Defaults to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_alias: Option<String>,
     /// Example invocations for documentation and testing.
     #[serde(default)]
     pub examples: Vec<ModuleExample>,
@@ -68,6 +74,7 @@ impl ScannedModule {
             version: "1.0.0".to_string(),
             annotations: None,
             documentation: None,
+            suggested_alias: None,
             examples: Vec::new(),
             metadata: HashMap::new(),
             warnings: Vec::new(),
@@ -174,6 +181,7 @@ mod tests {
                 ..Default::default()
             }),
             documentation: Some("Full documentation string".into()),
+            suggested_alias: None,
             examples: vec![ModuleExample {
                 title: "Example 1".into(),
                 description: Some("An example".into()),
@@ -210,15 +218,98 @@ mod tests {
         // Populate optional fields so they are included in serialization.
         m.annotations = Some(ModuleAnnotations::default());
         m.documentation = Some("doc".into());
+        m.suggested_alias = Some("count.check.list".into());
 
         let val = serde_json::to_value(&m).unwrap();
         let obj = val.as_object().unwrap();
         assert_eq!(
             obj.len(),
-            12,
-            "ScannedModule should have exactly 12 fields, got {}",
+            13,
+            "ScannedModule should have exactly 13 fields, got {}",
             obj.len()
         );
+    }
+
+    #[test]
+    fn test_suggested_alias_defaults_to_none() {
+        let m = ScannedModule::new(
+            "tasks.user_data.post".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "mod:func".into(),
+        );
+        assert!(m.suggested_alias.is_none());
+    }
+
+    #[test]
+    fn test_suggested_alias_set_via_field() {
+        let mut m = ScannedModule::new(
+            "tasks.user_data.post".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "mod:func".into(),
+        );
+        m.suggested_alias = Some("tasks.user_data.create".into());
+        assert_eq!(m.suggested_alias.as_deref(), Some("tasks.user_data.create"));
+    }
+
+    #[test]
+    fn test_suggested_alias_independent_of_metadata() {
+        let mut m = ScannedModule::new(
+            "tasks.user_data.post".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "mod:func".into(),
+        );
+        m.suggested_alias = Some("field_value".into());
+        m.metadata
+            .insert("suggested_alias".into(), json!("metadata_value"));
+        assert_eq!(m.suggested_alias.as_deref(), Some("field_value"));
+        assert_eq!(
+            m.metadata.get("suggested_alias").and_then(|v| v.as_str()),
+            Some("metadata_value")
+        );
+    }
+
+    #[test]
+    fn test_suggested_alias_serde_roundtrip() {
+        let mut m = ScannedModule::new(
+            "tasks.user_data.post".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "mod:func".into(),
+        );
+        m.suggested_alias = Some("tasks.user_data.create".into());
+        let serialized = serde_json::to_string(&m).unwrap();
+        let deserialized: ScannedModule = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.suggested_alias.as_deref(),
+            Some("tasks.user_data.create")
+        );
+    }
+
+    #[test]
+    fn test_suggested_alias_skipped_when_none() {
+        let m = ScannedModule::new(
+            "x".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "m:f".into(),
+        );
+        let val = serde_json::to_value(&m).unwrap();
+        let obj = val.as_object().unwrap();
+        // None fields with skip_serializing_if should be omitted.
+        assert!(!obj.contains_key("suggested_alias"));
     }
 
     #[test]
