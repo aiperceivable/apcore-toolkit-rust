@@ -39,7 +39,7 @@ pub enum OutputFormat {
 /// | `"registry"` | `OutputFormat::Registry` |
 /// | `"http_proxy"` / `"http-proxy"` / `"httpproxy"` | `OutputFormat::HttpProxy` |
 ///
-/// Returns `None` for unrecognised strings.
+/// Returns `Err` for unrecognised strings.
 ///
 /// # Usage
 ///
@@ -57,12 +57,12 @@ pub enum OutputFormat {
 ///     OutputFormat::HttpProxy => { /* use HTTPProxyRegistryWriter */ }
 /// }
 /// ```
-pub fn get_writer(format: &str) -> Option<OutputFormat> {
+pub fn get_writer(format: &str) -> Result<OutputFormat, String> {
     match format.to_ascii_lowercase().as_str() {
-        "yaml" => Some(OutputFormat::Yaml),
-        "registry" => Some(OutputFormat::Registry),
-        "http_proxy" | "http-proxy" | "httpproxy" => Some(OutputFormat::HttpProxy),
-        _ => None,
+        "yaml" => Ok(OutputFormat::Yaml),
+        "registry" => Ok(OutputFormat::Registry),
+        "http_proxy" | "http-proxy" | "httpproxy" => Ok(OutputFormat::HttpProxy),
+        _ => Err(format!("Unknown output format: {}", format)),
     }
 }
 
@@ -72,32 +72,35 @@ mod tests {
 
     #[test]
     fn test_get_writer_yaml() {
-        assert_eq!(get_writer("yaml"), Some(OutputFormat::Yaml));
+        assert_eq!(get_writer("yaml"), Ok(OutputFormat::Yaml));
     }
 
     #[test]
     fn test_get_writer_registry() {
-        assert_eq!(get_writer("registry"), Some(OutputFormat::Registry));
+        assert_eq!(get_writer("registry"), Ok(OutputFormat::Registry));
     }
 
     #[test]
     fn test_get_writer_http_proxy_variants() {
-        assert_eq!(get_writer("http_proxy"), Some(OutputFormat::HttpProxy));
-        assert_eq!(get_writer("http-proxy"), Some(OutputFormat::HttpProxy));
-        assert_eq!(get_writer("httpproxy"), Some(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("http_proxy"), Ok(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("http-proxy"), Ok(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("httpproxy"), Ok(OutputFormat::HttpProxy));
     }
 
     #[test]
     fn test_get_writer_case_insensitive() {
-        assert_eq!(get_writer("YAML"), Some(OutputFormat::Yaml));
-        assert_eq!(get_writer("Registry"), Some(OutputFormat::Registry));
-        assert_eq!(get_writer("HTTP_PROXY"), Some(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("YAML"), Ok(OutputFormat::Yaml));
+        assert_eq!(get_writer("Registry"), Ok(OutputFormat::Registry));
+        assert_eq!(get_writer("HTTP_PROXY"), Ok(OutputFormat::HttpProxy));
     }
 
     #[test]
     fn test_get_writer_unknown() {
-        assert_eq!(get_writer("xml"), None);
-        assert_eq!(get_writer(""), None);
+        assert!(get_writer("xml").is_err());
+        assert!(get_writer("").is_err());
+        assert!(get_writer("xml")
+            .unwrap_err()
+            .contains("Unknown output format"));
     }
 
     #[test]
