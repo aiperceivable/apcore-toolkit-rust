@@ -1,5 +1,24 @@
-// apcore-toolkit — Shared scanner, schema extraction, and output toolkit
-// Rust implementation — tri-language parity with Python and TypeScript (v0.5.0)
+//! apcore-toolkit — Shared scanner, schema extraction, and output toolkit.
+//!
+//! Rust implementation — tri-language parity with Python and TypeScript (v0.5.0).
+//!
+//! # Crate-root re-exports
+//!
+//! The HTTP verb helpers and `SCANNER_VERB_MAP` are exported directly at
+//! the crate root. As of v0.5.0 they are no longer re-exported through the
+//! `scanner` module path — import from the crate root or `http_verb_map`:
+//!
+//! ```
+//! use apcore_toolkit::{generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP};
+//!
+//! assert_eq!(resolve_http_verb("POST", false), "create");
+//! assert!(has_path_params("/tasks/{id}"));
+//! assert_eq!(SCANNER_VERB_MAP.get("POST").copied(), Some("create"));
+//! assert_eq!(
+//!     generate_suggested_alias("/tasks/user_data", "POST"),
+//!     "tasks.user_data.create"
+//! );
+//! ```
 
 pub mod ai_enhancer;
 pub mod binding_loader;
