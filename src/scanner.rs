@@ -29,7 +29,7 @@ pub use crate::http_verb_map::{
 /// struct AxumScanner;
 ///
 /// #[async_trait]
-/// impl Scanner<axum::Router> for AxumScanner {
+/// impl BaseScanner<axum::Router> for AxumScanner {
 ///     async fn scan(&self, app: &axum::Router) -> Vec<ScannedModule> { /* ... */ }
 ///     fn source_name(&self) -> &str { "axum" }
 /// }
@@ -38,13 +38,13 @@ pub use crate::http_verb_map::{
 /// struct ActixScanner;
 ///
 /// #[async_trait]
-/// impl Scanner<()> for ActixScanner {
+/// impl BaseScanner<()> for ActixScanner {
 ///     async fn scan(&self, _app: &()) -> Vec<ScannedModule> { /* ... */ }
 ///     fn source_name(&self) -> &str { "actix-web" }
 /// }
 /// ```
 #[async_trait]
-pub trait Scanner<App: Send + Sync = ()> {
+pub trait BaseScanner<App: Send + Sync = ()> {
     /// Scan endpoints and return module definitions.
     ///
     /// The `app` parameter receives framework-specific state (e.g., `axum::Router`,
