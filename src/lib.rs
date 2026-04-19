@@ -1,7 +1,8 @@
 // apcore-toolkit — Shared scanner, schema extraction, and output toolkit
-// Rust port of apcore-toolkit-python v0.3.0
+// Rust implementation — tri-language parity with Python and TypeScript (v0.5.0)
 
 pub mod ai_enhancer;
+pub mod binding_loader;
 pub mod display;
 pub mod formatting;
 pub mod http_verb_map;
@@ -15,6 +16,7 @@ pub mod types;
 
 // Re-export primary types at crate root for convenience.
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
+pub use binding_loader::{BindingLoadError, BindingLoader};
 pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::to_markdown;
 pub use http_verb_map::{
