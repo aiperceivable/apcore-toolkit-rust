@@ -10,19 +10,33 @@ use regex::Regex;
 
 use crate::types::ScannedModule;
 
-// Re-export the HTTP verb mapping helpers so downstream scanner crates
-// can call them through the familiar `scanner` module path, mirroring the
-// relationship between `infer_annotations_from_method` and the scanner
-// module in the other language SDKs.
-pub use crate::http_verb_map::{
-    generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
-};
-
 /// Abstract interface for framework scanners.
 ///
 /// Implementors provide `scan()` for framework-specific endpoint scanning
 /// and `source_name()` for identification. The `App` type parameter allows
-/// each framework adapter to accept its own application type:
+/// each framework adapter to accept its own application type.
+///
+/// # Language-specific API shape
+///
+/// The Rust `BaseScanner` trait intentionally contains only the primitive `scan()` and
+/// `source_name()` operations, keeping it object-safe (usable as `Box<dyn BaseScanner>`).
+///
+/// Helper utilities — [`filter_modules`], [`deduplicate_ids`], [`infer_annotations_from_method`] —
+/// are free functions in the `scanner` module rather than trait default methods.
+/// This differs from Python and TypeScript where these are instance methods on the class.
+///
+/// Usage:
+/// ```ignore
+/// let filtered = scanner::filter_modules(&modules, Some("my.*"), None)?;
+/// let deduplicated = scanner::deduplicate_ids(filtered);
+/// ```
+///
+/// # Note: ConventionScanner
+///
+/// `ConventionScanner` (available in Python as `apcore_toolkit.ConventionScanner`) is
+/// **Python-only**. It relies on Python's `importlib` module introspection for plain-function
+/// discovery, which has no equivalent in Rust. Rust consumers should use `BaseScanner`
+/// implementations that work with Rust's type system directly.
 ///
 /// ```ignore
 /// // Example: Axum adapter
@@ -61,6 +75,21 @@ pub trait BaseScanner<App: Send + Sync = ()> {
 /// - `exclude`: If set, modules whose `module_id` matches are removed.
 ///
 /// Returns an error if either pattern is not a valid regex.
+///
+/// # Rust API note
+///
+/// In Python and TypeScript, `filter_modules` / `filterModules` is an *instance method*
+/// on `BaseScanner`. In Rust it is a free function because the `BaseScanner` trait must
+/// remain object-safe — adding `Self`-independent helpers as default methods would prevent
+/// trait object usage. Call this function directly with your module slice:
+///
+/// ```ignore
+/// let filtered = scanner::filter_modules(&modules, Some("my_app.*"), None)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err(regex::Error)` if `include` or `exclude` contain invalid regex patterns.
 pub fn filter_modules(
     modules: &[ScannedModule],
     include: Option<&str>,
@@ -137,6 +166,9 @@ pub fn infer_annotations_from_method(method: &str) -> ModuleAnnotations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_verb_map::{
+        generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
+    };
     use serde_json::json;
 
     fn make_module(id: &str) -> ScannedModule {

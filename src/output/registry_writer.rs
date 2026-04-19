@@ -20,6 +20,11 @@ use crate::output::types::{Verifier, WriteResult};
 use crate::output::verifiers::{run_verifier_chain, RegistryVerifier};
 use crate::types::ScannedModule;
 
+// TODO(release-gate): deep-chain parity with Python/TypeScript RegistryWriter — manual
+// review required. RegistryWriter is the primary candidate for missing-registration bugs
+// (audit D11 was inconclusive). Verify that all three SDKs perform equivalent registry
+// mutations and handle the same error paths before tagging 0.5.0.
+
 /// Async handler function type for registered modules.
 pub type HandlerFn = Arc<
     dyn for<'a> Fn(

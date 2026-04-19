@@ -1,3 +1,6 @@
+# Development ergonomics for apcore-toolkit-rust.
+# These are Rust-specific dev tools — Python and TypeScript repos use their
+# own native tooling (pytest, npm scripts) without a shared Makefile.
 .PHONY: setup check test lint fmt clean
 
 # One-time dev environment setup

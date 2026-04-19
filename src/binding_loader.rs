@@ -20,6 +20,10 @@ use crate::types::ScannedModule;
 
 const SUPPORTED_SPEC_VERSIONS: &[&str] = &["1.0"];
 
+// TODO(release-gate): deep-chain parity with Python/TypeScript BindingLoader — manual
+// cross-SDK review required before tagging 0.5.0. D11 audit was inconclusive due to
+// sub-agent file access limits. BindingLoader is the flagship 0.5.0 cross-SDK feature.
+
 /// Errors produced by [`BindingLoader`].
 #[derive(Debug, Error)]
 pub enum BindingLoadError {
