@@ -28,6 +28,8 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `deduplicate_ids` | Resolves duplicate module IDs by appending `_2`, `_3`, etc. |
 | `infer_annotations_from_method` | Maps HTTP methods to behavioral `ModuleAnnotations` |
 | `YAMLWriter` | Generates `.binding.yaml` files for `apcore::BindingLoader` |
+| `BindingLoader` | Parses `.binding.yaml` files back into `ScannedModule` values (pure-data inverse of `YAMLWriter`, with loose/strict modes) |
+| `BindingLoadError` | `thiserror`-derived error enum: `PathNotFound`, `FileRead`, `YamlParse`, `MissingFields`, `InvalidStructure` |
 | `RegistryWriter` | Registers modules directly into an `apcore::Registry` with pluggable `HandlerFactory` |
 | `HTTPProxyRegistryWriter` | Registers HTTP proxy modules that forward requests to a running API (feature: `http-proxy`) |
 | `Enhancer` | Pluggable trait for metadata enhancement |
@@ -189,7 +191,7 @@ let md = to_markdown(&data, &opts).unwrap();
 ## Requirements
 
 - Rust edition 2021
-- apcore >= 0.14
+- apcore >= 0.19.0
 - See `Cargo.toml` for full dependency list
 
 ## Features

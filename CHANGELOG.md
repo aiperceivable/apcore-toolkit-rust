@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-04-19
+
+### Added
+
+- **`BindingLoader`** / **`BindingLoadError`** (`apcore_toolkit::binding_loader`) — parses `.binding.yaml` files back into `ScannedModule` objects, the inverse of `YAMLWriter`. Pure-data reader: no target import, no Registry mutation. Matches the Python and TypeScript implementations in API shape and behaviour.
+  - `load(path, strict) -> Result<Vec<ScannedModule>, BindingLoadError>` — single file or directory of `*.binding.yaml`.
+  - `load_data(data, strict)` — pre-parsed `serde_json::Value`.
+  - Loose mode (`strict=false`, default): only `module_id + target` required.
+  - Strict mode (`strict=true`): additionally requires `input_schema + output_schema`.
+  - `spec_version` validated via `tracing::warn`; missing or unsupported values log but do not fail.
+  - `annotations` parsed via `serde_json::from_value::<ModuleAnnotations>`; malformed values degrade to `None` with a warning.
+  - `BindingLoadError` enum (`thiserror`-derived) with variants: `PathNotFound`, `FileRead`, `YamlParse`, `MissingFields`, `InvalidStructure`.
+  - Re-exported from crate root: `apcore_toolkit::{BindingLoader, BindingLoadError}`.
+- **`ScannedModule.display`** — new optional field (`Option<serde_json::Value>`) for the sparse display overlay. `#[serde(skip_serializing_if = "Option::is_none")]` keeps the wire format clean. Constructor `ScannedModule::new()` initializes to `None`.
+
+### Changed
+
+- **`output::yaml_writer::build_binding`** — emits top-level `display:` key only when `module.display.is_some()`. Refactored from `serde_json::json!` macro to `serde_json::Map` construction to support conditional keys.
+- **`serializers::module_to_value`** — includes `display` key.
+- **`test_field_count`** updated from 13 → 14 to reflect the new field.
+- **`output::registry_writer` & `output::http_proxy_writer`** — `ModuleDescriptor` construction updated for apcore 0.19.0 breaking changes: `display: Option<serde_json::Value>` now required; `annotations` is now `Option<ModuleAnnotations>`; `http_proxy_writer` now populates all descriptor fields (previously partial, missed `description`/`documentation`/`version`/`examples`/`metadata`).
+
+### Dependencies
+
+- **`apcore >= 0.19.0`** — picks up the 12-field `ModuleAnnotations`, `FunctionModule.display`, and the expanded `ModuleDescriptor`. Serde handles new annotation fields automatically.
+
+### Tests
+
+- +26 new tests: 18 for `BindingLoader` (parsing, strict/loose modes, spec_version, filesystem loading, round-trip with `YAMLWriter`); 3 for `ScannedModule.display` (default, skip-if-none, serde round-trip); 2 for YAML writer display emission; 3 hardening tests (malformed display warn, null display drop, error message readability). Total suite: 304 tests.
+
+### Hardening (post-review)
+
+- **`BindingLoader::load`**: directory iteration now surfaces per-entry I/O failures via `BindingLoadError::FileRead` instead of silently discarding them via `filter_map(Result::ok)`.
+- **`BindingLoadError` `Display`**: `MissingFields` and `InvalidStructure` messages no longer leak `Some("…")` / `None` debug wrappers — they render the inner path/module_id directly with readable fallbacks.
+- **Malformed `display` in a binding entry** now emits a `tracing::warn` rather than being silently dropped.
 
 ## [0.4.0] - 2026-03-25
 

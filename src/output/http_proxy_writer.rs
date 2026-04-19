@@ -67,13 +67,21 @@ impl HTTPProxyRegistryWriter {
             };
 
             let descriptor = apcore::registry::registry::ModuleDescriptor {
-                name: module.module_id.clone(),
-                annotations: proxy.annotations.clone(),
+                module_id: module.module_id.clone(),
+                name: Some(module.module_id.clone()),
+                description: module.description.clone(),
+                documentation: module.documentation.clone(),
                 input_schema: module.input_schema.clone(),
                 output_schema: module.output_schema.clone(),
-                enabled: true,
+                version: module.version.clone(),
                 tags: module.tags.clone(),
+                annotations: Some(proxy.annotations.clone()),
+                examples: module.examples.clone(),
+                metadata: module.metadata.clone(),
+                display: module.display.clone(),
+                sunset_date: None,
                 dependencies: vec![],
+                enabled: true,
             };
 
             match registry.register(&module.module_id, Box::new(proxy), descriptor) {

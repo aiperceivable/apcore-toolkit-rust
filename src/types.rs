@@ -45,6 +45,12 @@ pub struct ScannedModule {
     /// Arbitrary key-value data (e.g., http_method, url_rule).
     #[serde(default)]
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Sparse display overlay (alias, description, cli/mcp/a2a surface
+    /// overrides) persisted to binding YAML. Distinct from
+    /// `metadata["display"]`, which holds the *resolved* form produced by
+    /// `DisplayResolver`. Defaults to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<serde_json::Value>,
     /// Non-fatal issues encountered during scanning.
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -77,6 +83,7 @@ impl ScannedModule {
             suggested_alias: None,
             examples: Vec::new(),
             metadata: HashMap::new(),
+            display: None,
             warnings: Vec::new(),
         }
     }
@@ -193,6 +200,7 @@ mod tests {
                 map.insert("http_method".into(), json!("GET"));
                 map
             },
+            display: None,
             warnings: vec!["a warning".into()],
         };
 
@@ -220,14 +228,60 @@ mod tests {
         m.documentation = Some("doc".into());
         m.suggested_alias = Some("count.check.list".into());
 
+        m.display = Some(json!({"alias": "count"}));
+
         let val = serde_json::to_value(&m).unwrap();
         let obj = val.as_object().unwrap();
         assert_eq!(
             obj.len(),
-            13,
-            "ScannedModule should have exactly 13 fields, got {}",
+            14,
+            "ScannedModule should have exactly 14 fields, got {}",
             obj.len()
         );
+    }
+
+    #[test]
+    fn test_display_defaults_to_none() {
+        let m = ScannedModule::new(
+            "x".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "m:f".into(),
+        );
+        assert!(m.display.is_none());
+    }
+
+    #[test]
+    fn test_display_skipped_when_none() {
+        let m = ScannedModule::new(
+            "x".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "m:f".into(),
+        );
+        let val = serde_json::to_value(&m).unwrap();
+        let obj = val.as_object().unwrap();
+        assert!(!obj.contains_key("display"));
+    }
+
+    #[test]
+    fn test_display_serde_roundtrip() {
+        let mut m = ScannedModule::new(
+            "x".into(),
+            "".into(),
+            json!({}),
+            json!({}),
+            vec![],
+            "m:f".into(),
+        );
+        m.display = Some(json!({"mcp": {"alias": "x_m"}}));
+        let s = serde_json::to_string(&m).unwrap();
+        let back: ScannedModule = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.display, Some(json!({"mcp": {"alias": "x_m"}})));
     }
 
     #[test]

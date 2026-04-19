@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use walkdir::WalkDir;
+
 use apcore::module::{ModuleAnnotations, ModuleExample};
 use serde_json::Value;
 use thiserror::Error;
@@ -66,8 +68,8 @@ pub enum BindingLoadError {
 ///
 /// ```ignore
 /// let loader = BindingLoader;
-/// let modules = loader.load(Path::new("bindings/"), false)?;
-/// let strict = loader.load(Path::new("foo.binding.yaml"), true)?;
+/// let modules = loader.load(Path::new("bindings/"), false, false)?;
+/// let strict = loader.load(Path::new("foo.binding.yaml"), true, false)?;
 /// ```
 ///
 /// In loose mode (`strict=false`, default), only `module_id` and `target`
@@ -85,38 +87,57 @@ impl BindingLoader {
     }
 
     /// Load one file or every `*.binding.yaml` in a directory.
-    pub fn load(&self, path: &Path, strict: bool) -> Result<Vec<ScannedModule>, BindingLoadError> {
+    ///
+    /// When `recursive` is `true`, subdirectories are traversed depth-first using
+    /// `walkdir`. When `false` (default), only the immediate directory is scanned.
+    pub fn load(
+        &self,
+        path: &Path,
+        strict: bool,
+        recursive: bool,
+    ) -> Result<Vec<ScannedModule>, BindingLoadError> {
         let files: Vec<PathBuf> = if path.is_file() {
             vec![path.to_path_buf()]
         } else if path.is_dir() {
-            let read_dir = fs::read_dir(path).map_err(|e| BindingLoadError::FileRead {
-                path: path.display().to_string(),
-                source: e,
-            })?;
-            let mut entries: Vec<PathBuf> = Vec::new();
-            for entry_result in read_dir {
-                match entry_result {
-                    Ok(entry) => {
-                        let p = entry.path();
-                        let is_binding = p
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.ends_with(".binding.yaml"));
-                        if is_binding {
-                            entries.push(p);
+            let mut entries: Vec<PathBuf> = if recursive {
+                WalkDir::new(path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".binding.yaml"))
+                    .map(|e| e.into_path())
+                    .collect()
+            } else {
+                let read_dir = fs::read_dir(path).map_err(|e| BindingLoadError::FileRead {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
+                let mut flat: Vec<PathBuf> = Vec::new();
+                for entry_result in read_dir {
+                    match entry_result {
+                        Ok(entry) => {
+                            let p = entry.path();
+                            let is_binding = p
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.ends_with(".binding.yaml"));
+                            if is_binding {
+                                flat.push(p);
+                            }
+                        }
+                        Err(e) => {
+                            // Surface per-entry failures rather than silently
+                            // discarding them; a permission error on a single
+                            // file should not make the directory load partial.
+                            return Err(BindingLoadError::FileRead {
+                                path: path.display().to_string(),
+                                source: e,
+                            });
                         }
                     }
-                    Err(e) => {
-                        // Surface per-entry failures rather than silently
-                        // discarding them; a permission error on a single
-                        // file should not make the directory load partial.
-                        return Err(BindingLoadError::FileRead {
-                            path: path.display().to_string(),
-                            source: e,
-                        });
-                    }
                 }
-            }
+                flat
+            };
             entries.sort();
             entries
         } else {
@@ -659,7 +680,7 @@ mod tests {
         let file = dir.path().join("one.binding.yaml");
         let doc = json!({"spec_version": "1.0", "bindings": [full_entry()]});
         fs::write(&file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
-        let modules = BindingLoader::new().load(&file, false).unwrap();
+        let modules = BindingLoader::new().load(&file, false, false).unwrap();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].module_id, "users.get_user");
     }
@@ -677,7 +698,7 @@ mod tests {
         }
         fs::write(dir.path().join("unrelated.yaml"), "irrelevant: true").unwrap();
 
-        let modules = BindingLoader::new().load(dir.path(), false).unwrap();
+        let modules = BindingLoader::new().load(dir.path(), false, false).unwrap();
         let ids: Vec<&str> = modules.iter().map(|m| m.module_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
@@ -686,7 +707,7 @@ mod tests {
     fn test_nonexistent_path() {
         let dir = TempDir::new().unwrap();
         let err = BindingLoader::new()
-            .load(&dir.path().join("nope"), false)
+            .load(&dir.path().join("nope"), false, false)
             .unwrap_err();
         assert!(matches!(err, BindingLoadError::PathNotFound { .. }));
     }
@@ -696,7 +717,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("bad.binding.yaml");
         fs::write(&f, "::: not yaml :::\n  - [").unwrap();
-        let err = BindingLoader::new().load(&f, false).unwrap_err();
+        let err = BindingLoader::new().load(&f, false, false).unwrap_err();
         assert!(matches!(err, BindingLoadError::YamlParse { .. }));
     }
 
@@ -705,7 +726,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("empty.binding.yaml");
         fs::write(&f, "").unwrap();
-        let modules = BindingLoader::new().load(&f, false).unwrap();
+        let modules = BindingLoader::new().load(&f, false, false).unwrap();
         assert!(modules.is_empty());
     }
 
@@ -743,7 +764,7 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = BindingLoader::new().load(dir.path(), false).unwrap();
+        let loaded = BindingLoader::new().load(dir.path(), false, false).unwrap();
         assert_eq!(loaded.len(), 1);
         let m = &loaded[0];
         assert_eq!(m.module_id, original.module_id);
@@ -760,5 +781,39 @@ mod tests {
         assert!(ann.readonly);
         assert!(ann.streaming);
         assert_eq!(ann.cache_ttl, 30);
+    }
+
+    #[test]
+    fn test_load_recursive_finds_nested_files() {
+        let dir = TempDir::new().unwrap();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+
+        // File in root dir
+        let doc_root = json!({"spec_version": "1.0", "bindings": [{"module_id": "root.mod", "target": "pkg:f0"}]});
+        fs::write(
+            dir.path().join("root.binding.yaml"),
+            serde_yaml_ng::to_string(&doc_root).unwrap(),
+        )
+        .unwrap();
+
+        // File in subdir
+        let doc_sub = json!({"spec_version": "1.0", "bindings": [{"module_id": "sub.mod", "target": "pkg:f1"}]});
+        fs::write(
+            subdir.join("sub.binding.yaml"),
+            serde_yaml_ng::to_string(&doc_sub).unwrap(),
+        )
+        .unwrap();
+
+        // Non-recursive: only root
+        let flat = BindingLoader::new().load(dir.path(), false, false).unwrap();
+        let flat_ids: Vec<&str> = flat.iter().map(|m| m.module_id.as_str()).collect();
+        assert_eq!(flat_ids, vec!["root.mod"]);
+
+        // Recursive: both
+        let recursive = BindingLoader::new().load(dir.path(), false, true).unwrap();
+        let mut rec_ids: Vec<&str> = recursive.iter().map(|m| m.module_id.as_str()).collect();
+        rec_ids.sort();
+        assert_eq!(rec_ids, vec!["root.mod", "sub.mod"]);
     }
 }
