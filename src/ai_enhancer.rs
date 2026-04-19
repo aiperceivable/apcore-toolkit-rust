@@ -55,8 +55,30 @@ pub enum AIEnhancerError {
 }
 
 /// Protocol for pluggable metadata enhancement.
+///
+/// # Blocking / async compatibility
+///
+/// `enhance` is a synchronous method. The bundled [`AIEnhancer`] performs
+/// blocking HTTP requests via `ureq`, so each call may park the current
+/// thread for up to `APCORE_AI_TIMEOUT` seconds (default 30) per module.
+/// **Do not call `enhance` directly from an async task** on a Tokio (or
+/// other async) runtime — it will block a runtime worker thread and can
+/// stall the scheduler under concurrent load.
+///
+/// From an async context, wrap the call in
+/// [`tokio::task::spawn_blocking`]:
+///
+/// ```ignore
+/// let enhanced = tokio::task::spawn_blocking(move || enhancer.enhance(modules)).await?;
+/// ```
+///
+/// Enhancement is a one-shot scanning-phase operation (not per-request),
+/// so this is typically invoked once during framework adapter bootstrap.
 pub trait Enhancer {
     /// Enhance a list of ScannedModules by filling metadata gaps.
+    ///
+    /// Synchronous and potentially long-running. See the trait-level doc
+    /// comment for guidance on invoking from async contexts.
     fn enhance(&self, modules: Vec<ScannedModule>) -> Vec<ScannedModule>;
 }
 
@@ -344,35 +366,30 @@ impl AIEnhancer {
                 let mut base = module.annotations.clone().unwrap_or_default();
                 let mut any_accepted = false;
 
-                // Boolean fields enumerated explicitly because Rust has no
-                // runtime reflection over `ModuleAnnotations`. Keep this list
-                // (and `set_bool_annotation` below) in sync with
-                // `apcore::module::ModuleAnnotations`. The integer/string/list
-                // branches further down also need updating when upstream adds
-                // new fields. The `extra` field is intentionally excluded —
-                // it is reserved for adapter extensions, not SLM judgement.
-                let bool_fields = [
-                    "readonly",
-                    "destructive",
-                    "idempotent",
-                    "requires_approval",
-                    "open_world",
-                    "streaming",
-                    "cacheable",
-                    "paginated",
-                ];
-                for field in &bool_fields {
-                    if let Some(val) = ann_data.get(*field).and_then(|v| v.as_bool()) {
-                        let field_conf = get_annotation_confidence(&ann_conf, field);
-                        confidence.insert(format!("annotations.{field}"), json!(field_conf));
-                        if field_conf >= self.threshold {
-                            set_bool_annotation(&mut base, field, val);
+                // Iterate boolean fields supplied by the SLM directly.
+                // `set_bool_annotation` validates each field's existence
+                // on `ModuleAnnotations` via a serde round-trip, so the
+                // set of known bool fields lives in one place — the
+                // upstream struct — and new fields added upstream are
+                // picked up automatically.
+                for (field, field_val) in ann_data.iter() {
+                    let Some(bool_val) = field_val.as_bool() else {
+                        continue;
+                    };
+                    let field_conf = get_annotation_confidence(&ann_conf, field);
+                    confidence.insert(format!("annotations.{field}"), json!(field_conf));
+                    if field_conf >= self.threshold {
+                        if set_bool_annotation(&mut base, field, bool_val) {
                             any_accepted = true;
                         } else {
                             result.warnings.push(format!(
-                                "Low confidence ({field_conf:.2}) for annotations.{field} — skipped. Review manually."
+                                "SLM returned unknown bool annotation '{field}' — ignored."
                             ));
                         }
+                    } else {
+                        result.warnings.push(format!(
+                            "Low confidence ({field_conf:.2}) for annotations.{field} — skipped. Review manually."
+                        ));
                     }
                 }
 
@@ -513,18 +530,43 @@ fn get_annotation_confidence(conf: &serde_json::Map<String, Value>, field: &str)
         .unwrap_or(0.0)
 }
 
-/// Set a boolean field on `ModuleAnnotations` by name.
-fn set_bool_annotation(ann: &mut ModuleAnnotations, field: &str, value: bool) {
-    match field {
-        "readonly" => ann.readonly = value,
-        "destructive" => ann.destructive = value,
-        "idempotent" => ann.idempotent = value,
-        "requires_approval" => ann.requires_approval = value,
-        "open_world" => ann.open_world = value,
-        "streaming" => ann.streaming = value,
-        "cacheable" => ann.cacheable = value,
-        "paginated" => ann.paginated = value,
-        _ => {}
+/// Set a boolean field on `ModuleAnnotations` by name via a serde
+/// round-trip. Returns `true` if the field exists on the struct and is a
+/// boolean; `false` if the field is unknown, non-boolean, or the
+/// round-trip fails. Using serde rather than a hardcoded match removes
+/// the two-list drift risk — new bool fields added to
+/// `apcore::module::ModuleAnnotations` upstream are picked up
+/// automatically.
+fn set_bool_annotation(ann: &mut ModuleAnnotations, field: &str, value: bool) -> bool {
+    let mut serialized = match serde_json::to_value(&ann) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("set_bool_annotation: serialize failed: {e}");
+            return false;
+        }
+    };
+    let Some(obj) = serialized.as_object_mut() else {
+        return false;
+    };
+    match obj.get(field) {
+        Some(Value::Bool(_)) => {
+            obj.insert(field.to_string(), Value::Bool(value));
+        }
+        // Field absent, or present but not a bool — reject rather than
+        // fabricate a new key (serde would happily accept unknown keys
+        // via `#[serde(extra)]` on ModuleAnnotations, but misclassifying
+        // a non-bool field as bool would corrupt the struct).
+        _ => return false,
+    }
+    match serde_json::from_value::<ModuleAnnotations>(serialized) {
+        Ok(new_ann) => {
+            *ann = new_ann;
+            true
+        }
+        Err(e) => {
+            warn!("set_bool_annotation: deserialize failed: {e}");
+            false
+        }
     }
 }
 
@@ -797,5 +839,56 @@ mod tests {
             "prompt should mention documentation"
         );
         assert!(prompt.contains("Markdown"));
+    }
+
+    // ---- set_bool_annotation (serde round-trip, D4-1 regression guards) ----
+
+    #[test]
+    fn test_set_bool_annotation_readonly() {
+        let mut ann = ModuleAnnotations::default();
+        assert!(set_bool_annotation(&mut ann, "readonly", true));
+        assert!(ann.readonly);
+    }
+
+    #[test]
+    fn test_set_bool_annotation_destructive() {
+        let mut ann = ModuleAnnotations::default();
+        assert!(set_bool_annotation(&mut ann, "destructive", true));
+        assert!(ann.destructive);
+    }
+
+    #[test]
+    fn test_set_bool_annotation_unknown_field_rejected() {
+        let mut ann = ModuleAnnotations::default();
+        assert!(!set_bool_annotation(
+            &mut ann,
+            "nonexistent_field_xyz",
+            true
+        ));
+        // Annotations unchanged.
+        assert!(is_default_annotations(&ann));
+    }
+
+    #[test]
+    fn test_set_bool_annotation_non_bool_field_rejected() {
+        let mut ann = ModuleAnnotations::default();
+        // `cache_ttl` is an integer field on ModuleAnnotations.
+        // Round-trip rejects setting it to a bool.
+        assert!(!set_bool_annotation(&mut ann, "cache_ttl", true));
+        assert_eq!(ann.cache_ttl, 0); // unchanged default
+    }
+
+    #[test]
+    fn test_set_bool_annotation_preserves_other_fields() {
+        let mut ann = ModuleAnnotations {
+            destructive: true,
+            cache_ttl: 99,
+            ..Default::default()
+        };
+        assert!(set_bool_annotation(&mut ann, "readonly", true));
+        // Original fields survive the serde round-trip.
+        assert!(ann.readonly);
+        assert!(ann.destructive);
+        assert_eq!(ann.cache_ttl, 99);
     }
 }
