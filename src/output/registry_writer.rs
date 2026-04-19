@@ -10,7 +10,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use apcore::context::Context;
 use apcore::errors::ModuleError;
@@ -215,10 +215,9 @@ impl RegistryWriter {
         }
 
         // Fallback: passthrough handler (schema-only registration)
-        eprintln!(
-            "WARNING: RegistryWriter using passthrough handler for module '{}'. \
-             Supply a HandlerFactory for real execution.",
-            module.module_id
+        warn!(
+            module_id = %module.module_id,
+            "RegistryWriter using passthrough handler; supply a HandlerFactory for real execution",
         );
         fn passthrough<'a>(
             inputs: serde_json::Value,
