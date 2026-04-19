@@ -23,7 +23,15 @@ pub fn annotations_to_dict(annotations: Option<&ModuleAnnotations>) -> Value {
     }
 }
 
-/// Convert a ScannedModule to a JSON Value with all fields.
+/// Convert a ScannedModule to a JSON Value with all 14 fields.
+///
+/// Unlike `serde_json::to_value(&module)` (which honours
+/// `#[serde(skip_serializing_if = "Option::is_none")]` on the struct and
+/// omits unset optionals), this function emits every field — using
+/// `Value::Null` for absent optionals — to match the `to_dict` wire format
+/// of the Python and TypeScript SDKs. Downstream tools that rely on a
+/// stable key set across languages should use this rather than the
+/// derived `Serialize` impl.
 pub fn module_to_dict(module: &ScannedModule) -> Value {
     let examples = serde_json::to_value(&module.examples).unwrap_or_else(|e| {
         warn!(
@@ -41,6 +49,7 @@ pub fn module_to_dict(module: &ScannedModule) -> Value {
         "version": module.version,
         "target": module.target,
         "annotations": annotations_to_dict(module.annotations.as_ref()),
+        "suggested_alias": module.suggested_alias,
         "examples": examples,
         "metadata": module.metadata,
         "input_schema": module.input_schema,
@@ -127,6 +136,7 @@ mod tests {
             "version",
             "target",
             "annotations",
+            "suggested_alias",
             "examples",
             "metadata",
             "input_schema",
@@ -140,6 +150,21 @@ mod tests {
         let actual_keys: std::collections::HashSet<&str> = obj.keys().map(|k| k.as_str()).collect();
 
         assert_eq!(actual_keys, expected_keys);
+    }
+
+    #[test]
+    fn test_module_to_dict_includes_suggested_alias() {
+        let mut m = sample_module();
+        m.suggested_alias = Some("users.get_alias".into());
+        let val = module_to_dict(&m);
+        assert_eq!(val["suggested_alias"], "users.get_alias");
+    }
+
+    #[test]
+    fn test_module_to_dict_suggested_alias_null_when_absent() {
+        let val = module_to_dict(&sample_module());
+        assert!(val.as_object().unwrap().contains_key("suggested_alias"));
+        assert_eq!(val["suggested_alias"], Value::Null);
     }
 
     #[test]
