@@ -43,7 +43,7 @@ impl Verifier for YAMLVerifier {
             Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
         };
 
-        let parsed: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        let parsed: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&content) {
             Ok(v) => v,
             Err(e) => return VerifyResult::fail(format!("Invalid YAML: {e}")),
         };

@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
@@ -21,18 +21,17 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-apcore = ">=0.18.0"
+apcore = ">=0.19.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 regex = "1"
 syn = { version = "2", features = ["parsing", "full"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 thiserror = "2"
 async-trait = "0.1"
-# Required transitively by apcore (registry, executor, context).
-tokio = { version = "1", features = ["full"] }
+walkdir = "2"
 
 # Used by ai_enhancer for synchronous SLM API calls (always included).
 ureq = { version = "3", features = ["json"] }

@@ -81,7 +81,7 @@ impl YAMLWriter {
                  # Generated: {timestamp}\n\
                  # Do not edit manually unless you intend to customize schemas.\n\n"
             );
-            let yaml_content = serde_yaml::to_string(&binding_data)
+            let yaml_content = serde_yaml_ng::to_string(&binding_data)
                 .map_err(|e| WriteError::new(file_path.display().to_string(), e.to_string()))?;
 
             fs::write(&file_path, format!("{header}{yaml_content}"))
@@ -131,20 +131,52 @@ fn sanitize_filename(module_id: &str) -> String {
 
 /// Build the YAML-serializable value for a ScannedModule.
 fn build_binding(module: &ScannedModule) -> serde_json::Value {
+    let mut binding = serde_json::Map::new();
+    binding.insert(
+        "module_id".into(),
+        serde_json::Value::from(module.module_id.clone()),
+    );
+    binding.insert(
+        "target".into(),
+        serde_json::Value::from(module.target.clone()),
+    );
+    binding.insert(
+        "description".into(),
+        serde_json::Value::from(module.description.clone()),
+    );
+    binding.insert(
+        "documentation".into(),
+        serde_json::to_value(&module.documentation).unwrap_or(serde_json::Value::Null),
+    );
+    binding.insert(
+        "tags".into(),
+        serde_json::to_value(&module.tags).unwrap_or(serde_json::json!([])),
+    );
+    binding.insert(
+        "version".into(),
+        serde_json::Value::from(module.version.clone()),
+    );
+    binding.insert(
+        "annotations".into(),
+        annotations_to_value(module.annotations.as_ref()),
+    );
+    binding.insert(
+        "examples".into(),
+        serde_json::to_value(&module.examples).unwrap_or(serde_json::json!([])),
+    );
+    binding.insert(
+        "metadata".into(),
+        serde_json::to_value(&module.metadata).unwrap_or(serde_json::json!({})),
+    );
+    binding.insert("input_schema".into(), module.input_schema.clone());
+    binding.insert("output_schema".into(), module.output_schema.clone());
+    if let Some(display) = &module.display {
+        binding.insert("display".into(), display.clone());
+    }
+
     serde_json::json!({
-        "bindings": [{
-            "module_id": module.module_id,
-            "target": module.target,
-            "description": module.description,
-            "documentation": module.documentation,
-            "tags": module.tags,
-            "version": module.version,
-            "annotations": annotations_to_value(module.annotations.as_ref()),
-            "examples": serde_json::to_value(&module.examples).unwrap_or(serde_json::json!([])),
-            "metadata": module.metadata,
-            "input_schema": module.input_schema,
-            "output_schema": module.output_schema,
-        }]
+        "spec_version": "1.0",
+        "bindings": [serde_json::Value::Object(binding)]
     })
 }
 
@@ -300,6 +332,7 @@ mod tests {
         let content = fs::read_to_string(file_path).unwrap();
         // Verify all expected fields are present in the YAML content
         for field in &[
+            "spec_version",
             "module_id",
             "target",
             "description",
@@ -354,6 +387,52 @@ mod tests {
     }
 
     #[test]
+    fn test_display_omitted_when_none() {
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let module = sample_module();
+        let modules = vec![module];
+        let results = writer
+            .write(&modules, dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+        let file_path = results[0].path.as_ref().unwrap();
+        let content = fs::read_to_string(file_path).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).unwrap();
+        let bindings = parsed["bindings"].as_sequence().unwrap();
+        assert!(
+            bindings[0].get("display").is_none(),
+            "display should be absent when module.display is None"
+        );
+    }
+
+    #[test]
+    fn test_display_emitted_when_set() {
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let mut module = sample_module();
+        module.display = Some(json!({"mcp": {"alias": "users_get"}, "alias": "users.get"}));
+        let modules = vec![module];
+        let results = writer
+            .write(&modules, dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+        let file_path = results[0].path.as_ref().unwrap();
+        let content = fs::read_to_string(file_path).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).unwrap();
+        let bindings = parsed["bindings"].as_sequence().unwrap();
+        let display = bindings[0]
+            .get("display")
+            .expect("display should be present");
+        assert_eq!(
+            display["alias"],
+            serde_yaml_ng::Value::String("users.get".into())
+        );
+        assert_eq!(
+            display["mcp"]["alias"],
+            serde_yaml_ng::Value::String("users_get".into())
+        );
+    }
+
+    #[test]
     fn test_none_annotations_in_binding() {
         let dir = TempDir::new().unwrap();
         let writer = YAMLWriter;
@@ -366,7 +445,7 @@ mod tests {
         let file_path = results[0].path.as_ref().unwrap();
         let content = fs::read_to_string(file_path).unwrap();
         // The file should still be valid YAML and contain the annotations key
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).unwrap();
         let bindings = parsed["bindings"].as_sequence().unwrap();
         assert_eq!(bindings.len(), 1);
         // annotations should be present (as null)

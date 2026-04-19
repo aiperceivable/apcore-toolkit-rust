@@ -163,7 +163,7 @@ impl DisplayResolver {
 
         for f in files {
             match std::fs::read_to_string(&f) {
-                Ok(content) => match serde_yaml::from_str::<Value>(&content) {
+                Ok(content) => match serde_yaml_ng::from_str::<Value>(&content) {
                     Ok(data) => {
                         let parsed = Self::parse_binding_data(&data);
                         result.extend(parsed);

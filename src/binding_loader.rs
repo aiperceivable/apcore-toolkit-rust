@@ -1,0 +1,764 @@
+// BindingLoader — parse `.binding.yaml` files back into `ScannedModule`.
+//
+// Inverse of `output::yaml_writer::YAMLWriter`. Unlike apcore's own
+// `BindingLoader` (which imports the target and registers a runtime module),
+// this loader is pure data: it parses YAML into `ScannedModule` objects for
+// validation, merging, diffing, or round-trip workflows. No code is loaded.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use apcore::module::{ModuleAnnotations, ModuleExample};
+use serde_json::Value;
+use thiserror::Error;
+use tracing::warn;
+
+use crate::types::ScannedModule;
+
+const SUPPORTED_SPEC_VERSIONS: &[&str] = &["1.0"];
+
+/// Errors produced by [`BindingLoader`].
+#[derive(Debug, Error)]
+pub enum BindingLoadError {
+    /// The path does not exist or cannot be stat'd.
+    #[error("path does not exist: {path}")]
+    PathNotFound { path: String },
+
+    /// Failure reading a binding file from disk.
+    #[error("failed to read {path}: {source}")]
+    FileRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The file content is not valid YAML.
+    #[error("failed to parse YAML in {path}: {source}")]
+    YamlParse {
+        path: String,
+        #[source]
+        source: serde_yaml_ng::Error,
+    },
+
+    /// A binding entry is missing one or more required fields.
+    #[error("missing or null required fields {missing_fields:?} (file={}, module_id={})",
+        .path.as_deref().unwrap_or("<inline>"),
+        .module_id.as_deref().unwrap_or("<unknown>"))]
+    MissingFields {
+        path: Option<String>,
+        module_id: Option<String>,
+        missing_fields: Vec<String>,
+    },
+
+    /// The document structure is invalid (e.g. top-level is not a mapping,
+    /// or `bindings` is not a list).
+    #[error("invalid binding structure in {}: {reason}", .path.as_deref().unwrap_or("<inline>"))]
+    InvalidStructure {
+        path: Option<String>,
+        reason: String,
+    },
+}
+
+/// Loads `.binding.yaml` files into [`ScannedModule`] objects.
+///
+/// # Usage
+///
+/// ```ignore
+/// let loader = BindingLoader;
+/// let modules = loader.load(Path::new("bindings/"), false)?;
+/// let strict = loader.load(Path::new("foo.binding.yaml"), true)?;
+/// ```
+///
+/// In loose mode (`strict=false`, default), only `module_id` and `target`
+/// are required; missing optional fields fall back to defaults.
+///
+/// In strict mode (`strict=true`), `input_schema` and `output_schema` are
+/// additionally required.
+#[derive(Debug, Default)]
+pub struct BindingLoader;
+
+impl BindingLoader {
+    /// Create a new BindingLoader.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Load one file or every `*.binding.yaml` in a directory.
+    pub fn load(&self, path: &Path, strict: bool) -> Result<Vec<ScannedModule>, BindingLoadError> {
+        let files: Vec<PathBuf> = if path.is_file() {
+            vec![path.to_path_buf()]
+        } else if path.is_dir() {
+            let read_dir = fs::read_dir(path).map_err(|e| BindingLoadError::FileRead {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+            let mut entries: Vec<PathBuf> = Vec::new();
+            for entry_result in read_dir {
+                match entry_result {
+                    Ok(entry) => {
+                        let p = entry.path();
+                        let is_binding = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with(".binding.yaml"));
+                        if is_binding {
+                            entries.push(p);
+                        }
+                    }
+                    Err(e) => {
+                        // Surface per-entry failures rather than silently
+                        // discarding them; a permission error on a single
+                        // file should not make the directory load partial.
+                        return Err(BindingLoadError::FileRead {
+                            path: path.display().to_string(),
+                            source: e,
+                        });
+                    }
+                }
+            }
+            entries.sort();
+            entries
+        } else {
+            return Err(BindingLoadError::PathNotFound {
+                path: path.display().to_string(),
+            });
+        };
+
+        let mut modules: Vec<ScannedModule> = Vec::new();
+        for f in files {
+            let content = fs::read_to_string(&f).map_err(|e| BindingLoadError::FileRead {
+                path: f.display().to_string(),
+                source: e,
+            })?;
+            let raw: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(&content).map_err(|e| BindingLoadError::YamlParse {
+                    path: f.display().to_string(),
+                    source: e,
+                })?;
+            if raw.is_null() {
+                warn!("BindingLoader: {} is empty, skipping", f.display());
+                continue;
+            }
+            let json_value =
+                serde_json::to_value(raw).map_err(|e| BindingLoadError::InvalidStructure {
+                    path: Some(f.display().to_string()),
+                    reason: format!("YAML → JSON conversion failed: {e}"),
+                })?;
+            modules.extend(self.parse_document(
+                &json_value,
+                Some(&f.display().to_string()),
+                strict,
+            )?);
+        }
+        Ok(modules)
+    }
+
+    /// Parse a pre-loaded binding JSON value (`{"bindings": [...]}`).
+    pub fn load_data(
+        &self,
+        data: &Value,
+        strict: bool,
+    ) -> Result<Vec<ScannedModule>, BindingLoadError> {
+        self.parse_document(data, None, strict)
+    }
+
+    // ------------------------------------------------------------------
+    // Internal helpers
+    // ------------------------------------------------------------------
+
+    fn parse_document(
+        &self,
+        raw: &Value,
+        file_path: Option<&str>,
+        strict: bool,
+    ) -> Result<Vec<ScannedModule>, BindingLoadError> {
+        let obj = raw
+            .as_object()
+            .ok_or_else(|| BindingLoadError::InvalidStructure {
+                path: file_path.map(String::from),
+                reason: "top-level binding document must be a mapping".into(),
+            })?;
+
+        Self::check_spec_version(obj.get("spec_version"), file_path);
+
+        let bindings = obj
+            .get("bindings")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| BindingLoadError::InvalidStructure {
+                path: file_path.map(String::from),
+                reason: "'bindings' key missing or not a list".into(),
+            })?;
+
+        let mut modules: Vec<ScannedModule> = Vec::with_capacity(bindings.len());
+        for entry in bindings {
+            let entry_obj =
+                entry
+                    .as_object()
+                    .ok_or_else(|| BindingLoadError::InvalidStructure {
+                        path: file_path.map(String::from),
+                        reason: "binding entry must be a mapping".into(),
+                    })?;
+            modules.push(Self::parse_entry(entry_obj, file_path, strict)?);
+        }
+        Ok(modules)
+    }
+
+    fn check_spec_version(spec_version: Option<&Value>, file_path: Option<&str>) {
+        let where_str = file_path.unwrap_or("<inline>");
+        match spec_version {
+            None | Some(Value::Null) => {
+                warn!(
+                    "BindingLoader: {} missing 'spec_version'; defaulting to '1.0'.",
+                    where_str
+                );
+            }
+            Some(v) => {
+                let as_str = v.as_str();
+                if !as_str.is_some_and(|s| SUPPORTED_SPEC_VERSIONS.contains(&s)) {
+                    warn!(
+                        "BindingLoader: {} has spec_version={} newer than supported {:?}; proceeding best-effort.",
+                        where_str, v, SUPPORTED_SPEC_VERSIONS
+                    );
+                }
+            }
+        }
+    }
+
+    fn parse_entry(
+        entry: &serde_json::Map<String, Value>,
+        file_path: Option<&str>,
+        strict: bool,
+    ) -> Result<ScannedModule, BindingLoadError> {
+        let required: &[&str] = if strict {
+            &["module_id", "target", "input_schema", "output_schema"]
+        } else {
+            &["module_id", "target"]
+        };
+
+        let missing: Vec<String> = required
+            .iter()
+            .filter(|f| matches!(entry.get(**f), None | Some(Value::Null)))
+            .map(|f| (*f).to_string())
+            .collect();
+        if !missing.is_empty() {
+            return Err(BindingLoadError::MissingFields {
+                path: file_path.map(String::from),
+                module_id: entry
+                    .get("module_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                missing_fields: missing,
+            });
+        }
+
+        let module_id = entry
+            .get("module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let target = entry
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let description = entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let version = entry
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0.0")
+            .to_string();
+
+        let documentation = entry
+            .get("documentation")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let suggested_alias = entry
+            .get("suggested_alias")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let input_schema = entry
+            .get("input_schema")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        let output_schema = entry
+            .get("output_schema")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        let tags: Vec<String> = entry
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let warnings: Vec<String> = entry
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let metadata: HashMap<String, Value> = entry
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+
+        let display = Self::parse_display(entry.get("display"), &module_id);
+
+        let annotations = Self::parse_annotations(entry.get("annotations"), &module_id);
+        let examples = Self::parse_examples(entry.get("examples"), &module_id);
+
+        Ok(ScannedModule {
+            module_id,
+            description,
+            input_schema,
+            output_schema,
+            tags,
+            target,
+            version,
+            annotations,
+            documentation,
+            suggested_alias,
+            examples,
+            metadata,
+            display,
+            warnings,
+        })
+    }
+
+    fn parse_display(value: Option<&Value>, module_id: &str) -> Option<Value> {
+        let v = value?;
+        if v.is_null() {
+            return None;
+        }
+        if !v.is_object() {
+            warn!(
+                "BindingLoader: display for module {} is not an object; ignoring",
+                module_id
+            );
+            return None;
+        }
+        Some(v.clone())
+    }
+
+    fn parse_annotations(value: Option<&Value>, module_id: &str) -> Option<ModuleAnnotations> {
+        let v = value?;
+        if v.is_null() {
+            return None;
+        }
+        if !v.is_object() {
+            warn!(
+                "BindingLoader: annotations for module {} is not a dict; treating as None",
+                module_id
+            );
+            return None;
+        }
+        match serde_json::from_value::<ModuleAnnotations>(v.clone()) {
+            Ok(ann) => Some(ann),
+            Err(e) => {
+                warn!(
+                    "BindingLoader: failed to parse annotations for module {}: {}; treating as None",
+                    module_id, e
+                );
+                None
+            }
+        }
+    }
+
+    fn parse_examples(value: Option<&Value>, module_id: &str) -> Vec<ModuleExample> {
+        let Some(v) = value else {
+            return Vec::new();
+        };
+        if v.is_null() {
+            return Vec::new();
+        }
+        let Some(arr) = v.as_array() else {
+            warn!(
+                "BindingLoader: examples for module {} is not a list; ignoring",
+                module_id
+            );
+            return Vec::new();
+        };
+        let mut result = Vec::with_capacity(arr.len());
+        for (i, ex) in arr.iter().enumerate() {
+            if !ex.is_object() {
+                warn!(
+                    "BindingLoader: examples[{}] of module {} is not a dict; ignoring",
+                    i, module_id
+                );
+                continue;
+            }
+            match serde_json::from_value::<ModuleExample>(ex.clone()) {
+                Ok(parsed) => result.push(parsed),
+                Err(e) => warn!(
+                    "BindingLoader: examples[{}] of module {} malformed: {}; ignoring",
+                    i, module_id, e
+                ),
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn minimal_entry() -> Value {
+        json!({"module_id": "x.y", "target": "pkg:func"})
+    }
+
+    fn full_entry() -> Value {
+        json!({
+            "module_id": "users.get_user",
+            "target": "myapp.views:get_user",
+            "description": "Get a user",
+            "documentation": "Returns a user by ID.",
+            "tags": ["users", "get"],
+            "version": "2.0.0",
+            "annotations": {"readonly": true, "cacheable": true, "cache_ttl": 60},
+            "examples": [
+                {"title": "happy", "inputs": {"id": 1}, "output": {"name": "alice"}}
+            ],
+            "metadata": {"http_method": "GET"},
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"},
+            "display": {"mcp": {"alias": "users_get"}, "alias": "users.get"},
+            "suggested_alias": "users.get.alt",
+            "warnings": ["stale"]
+        })
+    }
+
+    #[test]
+    fn test_loose_minimum_entry() {
+        let loader = BindingLoader::new();
+        let modules = loader
+            .load_data(&json!({"bindings": [minimal_entry()]}), false)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        let m = &modules[0];
+        assert_eq!(m.module_id, "x.y");
+        assert_eq!(m.target, "pkg:func");
+        assert_eq!(m.description, "");
+        assert_eq!(m.version, "1.0.0");
+        assert!(m.annotations.is_none());
+        assert!(m.display.is_none());
+        assert!(m.tags.is_empty());
+        assert_eq!(m.input_schema, json!({}));
+        assert_eq!(m.output_schema, json!({}));
+    }
+
+    #[test]
+    fn test_strict_requires_input_schema() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"bindings": [minimal_entry()]}), true)
+            .unwrap_err();
+        match err {
+            BindingLoadError::MissingFields {
+                missing_fields,
+                module_id,
+                ..
+            } => {
+                assert!(missing_fields.contains(&"input_schema".to_string()));
+                assert!(missing_fields.contains(&"output_schema".to_string()));
+                assert_eq!(module_id.as_deref(), Some("x.y"));
+            }
+            _ => panic!("expected MissingFields, got {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_strict_accepts_when_schemas_present() {
+        let loader = BindingLoader::new();
+        let entry = json!({
+            "module_id": "x.y",
+            "target": "pkg:func",
+            "input_schema": {"type": "object"},
+            "output_schema": {"type": "object"}
+        });
+        let modules = loader
+            .load_data(&json!({"bindings": [entry]}), true)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_missing_module_id_always_fails() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"bindings": [{"target": "p:f"}]}), false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BindingLoadError::MissingFields { ref missing_fields, .. }
+                if missing_fields.contains(&"module_id".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_missing_target_always_fails() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"bindings": [{"module_id": "x"}]}), false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BindingLoadError::MissingFields { ref missing_fields, .. }
+                if missing_fields.contains(&"target".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_missing_bindings_key() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"spec_version": "1.0"}), false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BindingLoadError::InvalidStructure { ref reason, .. } if reason.contains("bindings")
+        ));
+    }
+
+    #[test]
+    fn test_top_level_not_mapping() {
+        let loader = BindingLoader::new();
+        let err = loader.load_data(&json!(["a", "b"]), false).unwrap_err();
+        assert!(matches!(
+            err,
+            BindingLoadError::InvalidStructure { ref reason, .. } if reason.contains("mapping")
+        ));
+    }
+
+    #[test]
+    fn test_entry_not_a_mapping() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"bindings": ["scalar"]}), false)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BindingLoadError::InvalidStructure { ref reason, .. } if reason.contains("mapping")
+        ));
+    }
+
+    #[test]
+    fn test_annotations_parsed() {
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(&json!({"bindings": [full_entry()]}), false)
+            .unwrap()[0];
+        let ann = m.annotations.as_ref().expect("annotations should parse");
+        assert!(ann.readonly);
+        assert!(ann.cacheable);
+        assert_eq!(ann.cache_ttl, 60);
+    }
+
+    #[test]
+    fn test_annotations_wrong_type_treated_as_none() {
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(
+                &json!({"bindings": [{"module_id": "x", "target": "p:f", "annotations": "readonly"}]}),
+                false,
+            )
+            .unwrap()[0];
+        assert!(m.annotations.is_none());
+    }
+
+    #[test]
+    fn test_missing_fields_error_message_is_readable() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(&json!({"bindings": [{"module_id": "x"}]}), false)
+            .unwrap_err();
+        let msg = err.to_string();
+        // No raw debug-format wrappers leak into the user-facing message.
+        assert!(!msg.contains("Some("), "got: {msg}");
+        assert!(!msg.contains("None"), "got: {msg}");
+        assert!(msg.contains("x"), "module_id missing from message: {msg}");
+        assert!(msg.contains("target"), "missing field not listed: {msg}");
+    }
+
+    #[test]
+    fn test_display_wrong_type_dropped() {
+        // Malformed display (non-object) is dropped. We can't easily capture
+        // tracing warnings without a subscriber, but we assert the drop occurs.
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(
+                &json!({"bindings": [{"module_id": "x", "target": "p:f", "display": "not-a-dict"}]}),
+                false,
+            )
+            .unwrap()[0];
+        assert!(m.display.is_none());
+    }
+
+    #[test]
+    fn test_display_null_dropped() {
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(
+                &json!({"bindings": [{"module_id": "x", "target": "p:f", "display": null}]}),
+                false,
+            )
+            .unwrap()[0];
+        assert!(m.display.is_none());
+    }
+
+    #[test]
+    fn test_display_preserved() {
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(&json!({"bindings": [full_entry()]}), false)
+            .unwrap()[0];
+        assert_eq!(
+            m.display.as_ref().unwrap(),
+            &json!({"mcp": {"alias": "users_get"}, "alias": "users.get"})
+        );
+    }
+
+    #[test]
+    fn test_examples_parsed() {
+        let loader = BindingLoader::new();
+        let m = &loader
+            .load_data(&json!({"bindings": [full_entry()]}), false)
+            .unwrap()[0];
+        assert_eq!(m.examples.len(), 1);
+        assert_eq!(m.examples[0].title, "happy");
+    }
+
+    #[test]
+    fn test_load_single_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("one.binding.yaml");
+        let doc = json!({"spec_version": "1.0", "bindings": [full_entry()]});
+        fs::write(&file, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        let modules = BindingLoader::new().load(&file, false).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module_id, "users.get_user");
+    }
+
+    #[test]
+    fn test_load_directory_sorted() {
+        let dir = TempDir::new().unwrap();
+        for (i, name) in ["a", "b", "c"].iter().enumerate() {
+            let f = dir.path().join(format!("{name}.binding.yaml"));
+            let doc = json!({
+                "spec_version": "1.0",
+                "bindings": [{"module_id": name, "target": format!("pkg:f{i}")}]
+            });
+            fs::write(&f, serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        }
+        fs::write(dir.path().join("unrelated.yaml"), "irrelevant: true").unwrap();
+
+        let modules = BindingLoader::new().load(dir.path(), false).unwrap();
+        let ids: Vec<&str> = modules.iter().map(|m| m.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_nonexistent_path() {
+        let dir = TempDir::new().unwrap();
+        let err = BindingLoader::new()
+            .load(&dir.path().join("nope"), false)
+            .unwrap_err();
+        assert!(matches!(err, BindingLoadError::PathNotFound { .. }));
+    }
+
+    #[test]
+    fn test_malformed_yaml() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("bad.binding.yaml");
+        fs::write(&f, "::: not yaml :::\n  - [").unwrap();
+        let err = BindingLoader::new().load(&f, false).unwrap_err();
+        assert!(matches!(err, BindingLoadError::YamlParse { .. }));
+    }
+
+    #[test]
+    fn test_empty_file_skipped() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("empty.binding.yaml");
+        fs::write(&f, "").unwrap();
+        let modules = BindingLoader::new().load(&f, false).unwrap();
+        assert!(modules.is_empty());
+    }
+
+    #[test]
+    fn test_round_trip_with_yaml_writer() {
+        use crate::output::yaml_writer::YAMLWriter;
+
+        let mut original = ScannedModule::new(
+            "round.trip".into(),
+            "Round-trip test".into(),
+            json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+            json!({"type": "object"}),
+            vec!["demo".into()],
+            "demo.app:handler".into(),
+        );
+        original.version = "1.2.3".into();
+        original.annotations = Some(ModuleAnnotations {
+            readonly: true,
+            streaming: true,
+            cache_ttl: 30,
+            ..Default::default()
+        });
+        original.documentation = Some("Docs here".into());
+        original.metadata.insert("http_method".into(), json!("GET"));
+        original.display = Some(json!({"mcp": {"alias": "rt"}, "alias": "round-trip"}));
+
+        let dir = TempDir::new().unwrap();
+        YAMLWriter
+            .write(
+                &[original.clone()],
+                dir.path().to_str().unwrap(),
+                false,
+                false,
+                None,
+            )
+            .unwrap();
+
+        let loaded = BindingLoader::new().load(dir.path(), false).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let m = &loaded[0];
+        assert_eq!(m.module_id, original.module_id);
+        assert_eq!(m.target, original.target);
+        assert_eq!(m.description, original.description);
+        assert_eq!(m.documentation, original.documentation);
+        assert_eq!(m.tags, original.tags);
+        assert_eq!(m.version, original.version);
+        assert_eq!(m.input_schema, original.input_schema);
+        assert_eq!(m.output_schema, original.output_schema);
+        assert_eq!(m.metadata, original.metadata);
+        assert_eq!(m.display, original.display);
+        let ann = m.annotations.as_ref().unwrap();
+        assert!(ann.readonly);
+        assert!(ann.streaming);
+        assert_eq!(ann.cache_ttl, 30);
+    }
+}
