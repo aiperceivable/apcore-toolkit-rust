@@ -135,25 +135,53 @@ impl DisplayResolver {
     }
 
     /// Load binding files from a path (file or directory).
+    ///
+    /// Per-entry I/O failures (permission denied, unreadable symlinks) are
+    /// surfaced via `tracing::warn!` rather than silently dropped. This
+    /// mirrors the error-handling contract of
+    /// [`crate::binding_loader::BindingLoader::load`] — the two loaders
+    /// traverse the same directory shape and should behave consistently
+    /// when the filesystem misbehaves. The return type stays
+    /// `HashMap<String, Value>` (rather than `Result<…, …>`) to preserve
+    /// backward compatibility for 0.5.x.
     fn load_binding_files(&self, path: &Path) -> HashMap<String, Value> {
         let mut result = HashMap::new();
 
         let files: Vec<std::path::PathBuf> = if path.is_file() {
             vec![path.to_path_buf()]
         } else if path.is_dir() {
-            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(path)
-                .ok()
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| {
-                            p.file_name()
-                                .and_then(|n| n.to_str())
-                                .is_some_and(|n| n.ends_with(".binding.yaml"))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let mut entries: Vec<std::path::PathBuf> = Vec::new();
+            match std::fs::read_dir(path) {
+                Ok(read_dir) => {
+                    for entry_result in read_dir {
+                        match entry_result {
+                            Ok(entry) => {
+                                let p = entry.path();
+                                let is_binding = p
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .is_some_and(|n| n.ends_with(".binding.yaml"));
+                                if is_binding {
+                                    entries.push(p);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "DisplayResolver: skipping unreadable entry in {:?}: {}",
+                                    path, e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "DisplayResolver: failed to read binding directory {:?}: {}",
+                        path, e
+                    );
+                    return result;
+                }
+            }
             entries.sort();
             entries
         } else {
@@ -1101,5 +1129,34 @@ mod tests {
         let resolved = resolver.resolve(vec![module], None, None).unwrap();
         assert_eq!(resolved[0].metadata["custom_key"], "custom_value");
         assert!(resolved[0].metadata.contains_key("display"));
+    }
+
+    /// Behavioural guard for D2-1: `load_binding_files` must keep loading
+    /// the readable entries when the directory contains non-binding content
+    /// (e.g. a subdirectory or an unrelated file). Previously the whole
+    /// traversal used `filter_map(Result::ok)` and silently dropped errors;
+    /// the new iteration walks per-entry with structured `warn!` on I/O
+    /// failures. This test exercises the happy-path continuation — a true
+    /// per-entry I/O error is hard to provoke deterministically in CI.
+    #[test]
+    fn test_load_binding_files_ignores_non_binding_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ok.binding.yaml"),
+            "bindings:\n  - module_id: ok_mod\n    display:\n      alias: ok\n",
+        )
+        .unwrap();
+        // Sibling subdirectory and unrelated file that must not abort the load.
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a binding file").unwrap();
+
+        let resolver = DisplayResolver::new();
+        let resolved = resolver
+            .resolve(vec![make_module("ok_mod", "ok")], Some(dir.path()), None)
+            .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        let display = resolved[0].metadata.get("display").unwrap();
+        assert_eq!(display["alias"], "ok");
     }
 }
