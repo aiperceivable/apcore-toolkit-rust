@@ -23,6 +23,23 @@ const DEFAULT_THRESHOLD: f64 = 0.7;
 const DEFAULT_BATCH_SIZE: usize = 5;
 const DEFAULT_TIMEOUT: u64 = 30;
 
+/// All annotation fields that the SLM may assign confidence scores for.
+///
+/// Keep in sync with `apcore::module::ModuleAnnotations` when upstream adds fields.
+const ANNOTATION_FIELDS: &[&str] = &[
+    "description",
+    "documentation",
+    "tags",
+    "version",
+    "cacheable",
+    "readonly",
+    "destructive",
+    "idempotent",
+    "requires_confirmation",
+    "long_running",
+    "category",
+];
+
 /// Errors returned by [`AIEnhancer`] operations.
 #[derive(Debug, Error)]
 pub enum AIEnhancerError {
@@ -201,9 +218,14 @@ impl AIEnhancer {
             }
         }
 
-        parts.push(r#"  "confidence": {"#.into());
-        parts.push(r#"    "description": 0.0, "documentation": 0.0"#.into());
-        parts.push("  }".into());
+        let confidence_keys: serde_json::Value = ANNOTATION_FIELDS
+            .iter()
+            .map(|&field| (field.to_string(), serde_json::json!(0.0)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let confidence_str =
+            serde_json::to_string_pretty(&confidence_keys).unwrap_or_else(|_| "{}".into());
+        parts.push(format!(r#"  "confidence": {confidence_str}"#));
         parts.push("}".into());
         parts.push(String::new());
         parts.push("Respond with ONLY valid JSON, no markdown fences or explanation.".into());
