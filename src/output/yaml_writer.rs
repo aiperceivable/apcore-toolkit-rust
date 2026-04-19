@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use crate::output::errors::WriteError;
 use crate::output::types::{Verifier, WriteResult};
 use crate::output::verifiers::{run_verifier_chain, YAMLVerifier};
-use crate::serializers::annotations_to_value;
+use crate::serializers::annotations_to_dict;
 use crate::types::ScannedModule;
 
 /// Generates `.binding.yaml` files from ScannedModule instances.
@@ -158,7 +158,7 @@ fn build_binding(module: &ScannedModule) -> serde_json::Value {
     );
     binding.insert(
         "annotations".into(),
-        annotations_to_value(module.annotations.as_ref()),
+        annotations_to_dict(module.annotations.as_ref()),
     );
     binding.insert(
         "examples".into(),

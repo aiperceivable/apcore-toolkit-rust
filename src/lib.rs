@@ -37,7 +37,7 @@ pub use output::{get_writer, OutputFormat};
 pub use resolve_target::{resolve_target, ResolvedTarget};
 pub use scanner::{deduplicate_ids, filter_modules, infer_annotations_from_method, BaseScanner};
 pub use schema_utils::enrich_schema_descriptions;
-pub use serializers::{annotations_to_value, module_to_value, modules_to_values};
+pub use serializers::{annotations_to_dict, module_to_dict, modules_to_dicts};
 pub use types::ScannedModule;
 
 #[cfg(feature = "http-proxy")]
