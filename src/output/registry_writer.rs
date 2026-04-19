@@ -78,6 +78,14 @@ impl Default for RegistryWriter {
 
 impl RegistryWriter {
     /// Create a RegistryWriter with passthrough handlers (schema-only registration).
+    ///
+    /// # Panics
+    ///
+    /// This constructor does not panic. However, note that without a `HandlerFactory`,
+    /// all registered modules will use a passthrough handler that echoes inputs unchanged.
+    /// This is suitable for schema-only registration. For real execution, use
+    /// [`RegistryWriter::with_handler_factory`] to supply a factory that resolves targets
+    /// to actual async handlers.
     pub fn new() -> Self {
         Self {
             handler_factory: None,
@@ -129,10 +137,14 @@ impl RegistryWriter {
                 annotations: module.annotations.clone(),
                 examples: module.examples.clone(),
                 metadata: module.metadata.clone(),
+                display: module.display.clone(),
                 sunset_date: None,
                 dependencies: vec![],
                 enabled: true,
             };
+            // Note: unlike Python/TypeScript, Rust collects per-module registration errors
+            // rather than aborting. This is intentional — partial registration is preferred
+            // over a hard stop, giving callers the opportunity to inspect and handle each failure.
             if let Err(e) = registry.register(&module.module_id, Box::new(fm), descriptor) {
                 results.push(WriteResult::failed(
                     module.module_id.clone(),
@@ -198,6 +210,11 @@ impl RegistryWriter {
         }
 
         // Fallback: passthrough handler (schema-only registration)
+        eprintln!(
+            "WARNING: RegistryWriter using passthrough handler for module '{}'. \
+             Supply a HandlerFactory for real execution.",
+            module.module_id
+        );
         fn passthrough<'a>(
             inputs: serde_json::Value,
             _ctx: &'a Context<serde_json::Value>,
