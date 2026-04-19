@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0-rc.1] - 2026-04-19
+
+Pre-release tag. The `TODO(release-gate)` comments in `binding_loader.rs` and `registry_writer.rs` flag the cross-SDK parity audit for `BindingLoader` and `RegistryWriter` as inconclusive at time of tagging. Version will be bumped to a final `0.5.0` once those TODOs are resolved.
+
+### Changed (breaking)
+
+- **`scanner` module no longer re-exports `http_verb_map` helpers.** Previously `apcore_toolkit::scanner::resolve_http_verb`, `::SCANNER_VERB_MAP`, `::has_path_params`, and `::generate_suggested_alias` were reachable via a `pub use crate::http_verb_map::{...}` inside `src/scanner.rs`. Those re-exports were removed to eliminate the double path. Downstream adapter crates must import from the crate root (`apcore_toolkit::{resolve_http_verb, SCANNER_VERB_MAP, has_path_params, generate_suggested_alias}`) or from `apcore_toolkit::http_verb_map::{...}`. The crate-root re-exports are guarded by a doc test in `src/lib.rs`.
+
+### Hardening
+
+- **`BindingLoader::parse_entry`** — wrong-type required fields (e.g. `module_id: 42`, `target: true`, empty-string `module_id`) are now surfaced as `BindingLoadError::MissingFields` instead of silently coerced to `""`. In strict mode, non-object `input_schema`/`output_schema` are likewise rejected. The error display updated from "missing or null" to "missing or invalid required fields".
+- **`BindingLoader::load`** (recursive branch) — per-entry `WalkDir` traversal failures (permission denied, broken symlinks, I/O errors) are now surfaced as `BindingLoadError::FileRead`, matching the non-recursive branch. Previously `filter_map(|e| e.ok())` silently dropped them, producing partial result sets.
+- **`output::registry_writer::RegistryWriter::to_function_module`** — passthrough-handler warning migrated from `eprintln!` to `tracing::warn!(module_id = %…, …)`, honouring the crate's `tracing`-only logging rule.
+
+### Tests
+
+- +5 new regression tests (`test_wrong_type_module_id_integer_rejected`, `test_wrong_type_target_bool_rejected`, `test_empty_string_module_id_rejected`, `test_strict_wrong_type_input_schema_rejected`, `test_recursive_load_surfaces_walkdir_errors`). Removed 4 misleading `test_reexport_*` tests from `scanner::tests` that duplicated `http_verb_map::tests` coverage. Added one crate-root re-export doc test in `src/lib.rs`. Total suite: 306 unit tests + 6 doctests.
+
 ## [0.5.0] - 2026-04-19
 
 ### Added
