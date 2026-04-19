@@ -7,6 +7,14 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Absolute ceiling on recursion depth, regardless of caller-supplied
+/// `MarkdownOptions::max_depth`. Guards against stack overflow when a
+/// caller passes `usize::MAX` (or a similarly large value) together with
+/// a deeply-nested Value. The rendering routines recurse once per nested
+/// object / array, so this bounds the Rust call stack at roughly 32
+/// frames per `to_markdown` invocation plus constant overhead.
+const MAX_DEPTH_HARD_CAP: usize = 32;
+
 /// Options for Markdown conversion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownOptions {
@@ -60,12 +68,18 @@ pub fn to_markdown(data: &Value, options: &MarkdownOptions) -> Result<String, St
         .map(|v| v.iter().cloned().collect())
         .unwrap_or_default();
 
+    // Clamp the caller's max_depth to MAX_DEPTH_HARD_CAP to prevent
+    // stack overflow on adversarial input (e.g. max_depth = usize::MAX
+    // combined with a pathologically nested Value). Renderers further
+    // downstream trust this bound and do not re-clamp.
+    let effective_max_depth = options.max_depth.min(MAX_DEPTH_HARD_CAP);
+
     render_dict(
         &filtered,
         &mut lines,
         0,
         0,
-        options.max_depth,
+        effective_max_depth,
         options.table_threshold,
         &exclude_set,
     );
@@ -574,5 +588,63 @@ mod tests {
         let result = compact_repr(&long_value, 20);
         assert!(result.len() <= 20);
         assert!(result.ends_with("..."));
+    }
+
+    /// Regression guard for D3-2: even with `max_depth = usize::MAX`,
+    /// a pathologically deep Value must not stack-overflow. The effective
+    /// recursion bound is `MAX_DEPTH_HARD_CAP` (32).
+    #[test]
+    fn test_to_markdown_deep_recursion_bounded() {
+        // Build a 500-level-deep nested object.
+        let mut data = json!({"leaf": "bottom"});
+        for i in 0..500 {
+            let key = format!("lvl_{i}");
+            data = json!({ key: data });
+        }
+
+        let opts = MarkdownOptions {
+            max_depth: usize::MAX,
+            ..Default::default()
+        };
+
+        // Must return Ok without stack-overflow. We don't assert on the
+        // rendered content — the important contract is "no panic, no
+        // overflow" at the clamp boundary.
+        let result = to_markdown(&data, &opts);
+        assert!(
+            result.is_ok(),
+            "to_markdown with max_depth=usize::MAX must not panic on deep input; got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn test_max_depth_clamp_at_hard_cap() {
+        // Caller-supplied max_depth beyond MAX_DEPTH_HARD_CAP must produce
+        // the same output as max_depth = MAX_DEPTH_HARD_CAP for the same
+        // input. Build a 40-level nest; rendering with max_depth=1000 and
+        // max_depth=32 should match.
+        let mut data = json!({"leaf": "v"});
+        for i in 0..40 {
+            let key = format!("k{i}");
+            data = json!({ key: data });
+        }
+
+        let a = to_markdown(
+            &data,
+            &MarkdownOptions {
+                max_depth: MAX_DEPTH_HARD_CAP,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let b = to_markdown(
+            &data,
+            &MarkdownOptions {
+                max_depth: 1000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(a, b);
     }
 }
