@@ -47,8 +47,12 @@ pub enum BindingLoadError {
         source: serde_yaml_ng::Error,
     },
 
-    /// A binding entry is missing one or more required fields.
-    #[error("missing or null required fields {missing_fields:?} (file={}, module_id={})",
+    /// A binding entry is missing or has an invalid value for one or more
+    /// required fields. Covers three cases: absent key, explicit `null`, and
+    /// wrong-type scalar (e.g. `module_id: 42`, `target: true`). All three
+    /// are treated as "required field not supplied" rather than silently
+    /// coerced to empty strings or zero values downstream.
+    #[error("missing or invalid required fields {missing_fields:?} (file={}, module_id={})",
         .path.as_deref().unwrap_or("<inline>"),
         .module_id.as_deref().unwrap_or("<unknown>"))]
     MissingFields {
@@ -104,13 +108,32 @@ impl BindingLoader {
             vec![path.to_path_buf()]
         } else if path.is_dir() {
             let mut entries: Vec<PathBuf> = if recursive {
-                WalkDir::new(path)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                    .filter(|e| e.file_name().to_string_lossy().ends_with(".binding.yaml"))
-                    .map(|e| e.into_path())
-                    .collect()
+                // Surface per-entry traversal failures (permission denied,
+                // broken symlink, I/O errors) rather than silently dropping
+                // them — matches the non-recursive branch's policy so a
+                // caller switching `recursive=false` → `true` gets a
+                // consistent error contract.
+                let mut flat: Vec<PathBuf> = Vec::new();
+                for entry_result in WalkDir::new(path) {
+                    let entry = entry_result.map_err(|e| {
+                        let io_err = e
+                            .into_io_error()
+                            .unwrap_or_else(|| std::io::Error::other("walkdir traversal error"));
+                        BindingLoadError::FileRead {
+                            path: path.display().to_string(),
+                            source: io_err,
+                        }
+                    })?;
+                    if entry.file_type().is_file()
+                        && entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".binding.yaml")
+                    {
+                        flat.push(entry.into_path());
+                    }
+                }
+                flat
             } else {
                 let read_dir = fs::read_dir(path).map_err(|e| BindingLoadError::FileRead {
                     path: path.display().to_string(),
@@ -261,9 +284,21 @@ impl BindingLoader {
             &["module_id", "target"]
         };
 
+        // A required field is "missing or invalid" when absent, null, or of
+        // the wrong type. Previously only None/Null was rejected, so
+        // `module_id: 42` or `target: true` would silently coerce to an
+        // empty string downstream and corrupt the registered module.
         let missing: Vec<String> = required
             .iter()
-            .filter(|f| matches!(entry.get(**f), None | Some(Value::Null)))
+            .filter(|f| match entry.get(**f) {
+                None | Some(Value::Null) => true,
+                Some(v) => match **f {
+                    // Schemas must be objects.
+                    "input_schema" | "output_schema" => !v.is_object(),
+                    // Identifiers must be non-empty strings.
+                    _ => v.as_str().is_none_or(|s| s.is_empty()),
+                },
+            })
             .map(|f| (*f).to_string())
             .collect();
         if !missing.is_empty() {
@@ -785,6 +820,130 @@ mod tests {
         assert!(ann.readonly);
         assert!(ann.streaming);
         assert_eq!(ann.cache_ttl, 30);
+    }
+
+    // ---- Wrong-type scalar rejection (D1-1 regression guard) ----
+
+    #[test]
+    fn test_wrong_type_module_id_integer_rejected() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(
+                &json!({"bindings": [{"module_id": 42, "target": "p:f"}]}),
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                BindingLoadError::MissingFields { missing_fields, .. }
+                    if missing_fields.iter().any(|f| f == "module_id")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrong_type_target_bool_rejected() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(
+                &json!({"bindings": [{"module_id": "x", "target": true}]}),
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                BindingLoadError::MissingFields { missing_fields, .. }
+                    if missing_fields.iter().any(|f| f == "target")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_empty_string_module_id_rejected() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(
+                &json!({"bindings": [{"module_id": "", "target": "p:f"}]}),
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                BindingLoadError::MissingFields { missing_fields, .. }
+                    if missing_fields.iter().any(|f| f == "module_id")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_strict_wrong_type_input_schema_rejected() {
+        let loader = BindingLoader::new();
+        let err = loader
+            .load_data(
+                &json!({"bindings": [{
+                    "module_id": "x",
+                    "target": "p:f",
+                    "input_schema": 42,
+                    "output_schema": {"type": "object"}
+                }]}),
+                true,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                BindingLoadError::MissingFields { missing_fields, .. }
+                    if missing_fields.iter().any(|f| f == "input_schema")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    // ---- Recursive WalkDir error propagation (D1-2 regression guard) ----
+
+    #[test]
+    #[cfg(unix)]
+    fn test_recursive_load_surfaces_walkdir_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Running as root bypasses UNIX permissions and makes this test
+        // a no-op. Skip in that case rather than produce a misleading pass.
+        let is_root = libc_geteuid() == 0;
+        if is_root {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let unreadable = dir.path().join("unreadable");
+        fs::create_dir(&unreadable).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = BindingLoader::new().load(dir.path(), false, true);
+
+        // Restore permissions so TempDir::drop can clean up.
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).ok();
+
+        assert!(
+            matches!(result, Err(BindingLoadError::FileRead { .. })),
+            "recursive load should propagate per-entry I/O errors, got: {result:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    fn libc_geteuid() -> u32 {
+        // Avoid a libc dev-dep solely for this test — inline the syscall.
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: `geteuid` is a stateless C function that takes no args
+        // and returns the effective UID.
+        unsafe { geteuid() }
     }
 
     #[test]
