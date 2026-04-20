@@ -11,9 +11,18 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
+
+static MCP_ALIAS_SANITIZE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9_-]").expect("valid regex"));
+static MCP_ALIAS_PATTERN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*$").expect("valid regex"));
+static CLI_ALIAS_PATTERN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_-]*$").expect("valid regex"));
 
 use crate::types::ScannedModule;
 
@@ -290,8 +299,9 @@ impl DisplayResolver {
             .unwrap_or("")
             .to_string();
 
-        let mcp_alias_re = Regex::new(r"[^a-zA-Z0-9_-]").unwrap();
-        let mut sanitized = mcp_alias_re.replace_all(&raw_mcp_alias, "_").to_string();
+        let mut sanitized = MCP_ALIAS_SANITIZE_RE
+            .replace_all(&raw_mcp_alias, "_")
+            .to_string();
         if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
             sanitized = format!("_{sanitized}");
         }
@@ -368,8 +378,8 @@ impl DisplayResolver {
         module_id: &str,
         cli_alias_explicit: bool,
     ) -> Result<(), DisplayResolverError> {
-        let mcp_alias_pattern = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*$").unwrap();
-        let cli_alias_pattern = Regex::new(r"^[a-z][a-z0-9_-]*$").unwrap();
+        let mcp_alias_pattern = &*MCP_ALIAS_PATTERN_RE;
+        let cli_alias_pattern = &*CLI_ALIAS_PATTERN_RE;
 
         // MCP: enforce 64-char hard limit (alias was already auto-sanitized)
         let mcp_alias = display["mcp"]["alias"].as_str().unwrap_or("").to_string();

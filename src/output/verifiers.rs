@@ -58,14 +58,15 @@ impl Verifier for YAMLVerifier {
             _ => return VerifyResult::fail("Missing or empty 'bindings' list".into()),
         };
 
-        let first = &bindings_seq[0];
-        for field in &["module_id", "target"] {
-            match first.get(*field) {
-                Some(v) if !v.is_null() => {}
-                _ => {
-                    return VerifyResult::fail(format!(
-                        "Missing required field '{field}' in binding"
-                    ))
+        for (i, entry) in bindings_seq.iter().enumerate() {
+            for field in &["module_id", "target"] {
+                match entry.get(*field) {
+                    Some(v) if !v.is_null() => {}
+                    _ => {
+                        return VerifyResult::fail(format!(
+                            "Missing required field '{field}' in binding at index {i}"
+                        ))
+                    }
                 }
             }
         }
@@ -232,6 +233,34 @@ mod tests {
         writeln!(f, "other_key: value").unwrap();
         let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
         assert!(!result.ok);
+    }
+
+    #[test]
+    fn test_yaml_verifier_multi_binding_second_entry_missing_target() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "bindings:\n  - module_id: first\n    target: app:fn1\n  - module_id: second"
+        )
+        .unwrap();
+        let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok, "should fail when second entry lacks 'target'");
+        assert!(
+            result.error.unwrap().contains("target"),
+            "error should mention missing field"
+        );
+    }
+
+    #[test]
+    fn test_yaml_verifier_multi_binding_all_valid() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "bindings:\n  - module_id: first\n    target: app:fn1\n  - module_id: second\n    target: app:fn2"
+        )
+        .unwrap();
+        let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(result.ok, "should pass when all entries are valid");
     }
 
     #[test]

@@ -151,6 +151,11 @@ impl RegistryWriter {
             // rather than aborting. This is intentional — partial registration is preferred
             // over a hard stop, giving callers the opportunity to inspect and handle each failure.
             if let Err(e) = registry.register(&module.module_id, Box::new(fm), descriptor) {
+                warn!(
+                    module_id = %module.module_id,
+                    error = %e,
+                    "RegistryWriter registration failed"
+                );
                 results.push(WriteResult::failed(
                     module.module_id.clone(),
                     None,

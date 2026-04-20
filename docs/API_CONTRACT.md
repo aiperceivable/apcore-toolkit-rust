@@ -233,7 +233,7 @@ pub enum OutputFormat {
     HttpProxy,
 }
 
-pub fn get_writer(format: &str) -> Option<OutputFormat>;
+pub fn get_writer(format: &str) -> Result<OutputFormat, String>;
 ```
 
 Note: Python's `PythonWriter` generates Python code — not applicable in Rust. The Rust port omits it.

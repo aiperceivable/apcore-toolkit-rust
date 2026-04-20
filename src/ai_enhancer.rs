@@ -327,7 +327,7 @@ impl AIEnhancer {
                     .unwrap_or(0.0);
                 confidence.insert("description".into(), json!(conf));
                 if conf >= self.threshold {
-                    result.description = desc.to_string();
+                    result.description = clamp_str(desc, 500, &module.module_id, "description");
                 } else {
                     result.warnings.push(format!(
                         "Low confidence ({conf:.2}) for description — skipped. Review manually."
@@ -346,7 +346,12 @@ impl AIEnhancer {
                     .unwrap_or(0.0);
                 confidence.insert("documentation".into(), json!(conf));
                 if conf >= self.threshold {
-                    result.documentation = Some(doc.to_string());
+                    result.documentation = Some(strip_ansi(&clamp_str(
+                        doc,
+                        2000,
+                        &module.module_id,
+                        "documentation",
+                    )));
                 } else {
                     result.warnings.push(format!(
                         "Low confidence ({conf:.2}) for documentation — skipped. Review manually."
@@ -589,6 +594,47 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Clamp an SLM-supplied string to `max_chars` bytes, warning if truncated.
+fn clamp_str(s: &str, max_chars: usize, module_id: &str, field: &str) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    // Truncate at a char boundary.
+    let truncated = &s[..s
+        .char_indices()
+        .take_while(|(i, _)| *i < max_chars)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(max_chars)];
+    tracing::warn!(
+        module_id = %module_id,
+        field = %field,
+        original_len = s.len(),
+        clamped_len = truncated.len(),
+        "SLM-supplied field truncated to prevent oversized output"
+    );
+    truncated.to_string()
+}
+
+/// Strip ANSI CSI escape sequences (ESC [ ... letter) from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            for c2 in chars.by_ref() {
+                if c2.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -890,5 +936,44 @@ mod tests {
         assert!(ann.readonly);
         assert!(ann.destructive);
         assert_eq!(ann.cache_ttl, 99);
+    }
+
+    #[test]
+    fn test_clamp_str_under_limit() {
+        let s = "hello";
+        assert_eq!(clamp_str(s, 500, "mod", "desc"), "hello");
+    }
+
+    #[test]
+    fn test_clamp_str_over_limit_truncates() {
+        let s = "a".repeat(600);
+        let result = clamp_str(&s, 500, "mod", "desc");
+        assert_eq!(result.len(), 500);
+    }
+
+    #[test]
+    fn test_clamp_str_unicode_boundary() {
+        // "é" is 2 bytes — ensure we don't split it
+        let s = "é".repeat(300); // 600 bytes
+        let result = clamp_str(&s, 500, "mod", "desc");
+        assert!(result.len() <= 500);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_strip_ansi_no_sequences() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_ansi_removes_color_codes() {
+        let input = "\x1b[31mred text\x1b[0m";
+        assert_eq!(strip_ansi(input), "red text");
+    }
+
+    #[test]
+    fn test_strip_ansi_mixed_content() {
+        let input = "normal \x1b[1mbold\x1b[0m text";
+        assert_eq!(strip_ansi(input), "normal bold text");
     }
 }

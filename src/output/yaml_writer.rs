@@ -44,9 +44,18 @@ impl YAMLWriter {
                 .map_err(|e| WriteError::new(output_dir.into(), e.to_string()))?;
         }
 
-        let output_path = Path::new(output_dir)
-            .canonicalize()
-            .unwrap_or_else(|_| Path::new(output_dir).to_path_buf());
+        // After create_dir_all succeeds the directory exists and must be resolvable.
+        // Falling back to a non-canonical path would silently disable the starts_with guard.
+        let output_path = if dry_run {
+            Path::new(output_dir).to_path_buf()
+        } else {
+            Path::new(output_dir).canonicalize().map_err(|e| {
+                WriteError::new(
+                    output_dir.into(),
+                    format!("Cannot resolve output directory: {e}"),
+                )
+            })?
+        };
 
         let mut results: Vec<WriteResult> = Vec::new();
         let timestamp = Utc::now().to_rfc3339();

@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use regex::Regex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use apcore::context::Context;
 use apcore::errors::ModuleError;
@@ -90,7 +90,7 @@ impl HTTPProxyRegistryWriter {
                     results.push(WriteResult::new(module.module_id.clone()));
                 }
                 Err(e) => {
-                    debug!("Skipped {}: {}", module.module_id, e);
+                    warn!(module_id = %module.module_id, error = %e, "HTTPProxyRegistryWriter registration failed");
                     results.push(WriteResult::failed(
                         module.module_id.clone(),
                         None,
@@ -124,6 +124,19 @@ fn get_http_fields(module: &ScannedModule) -> (String, String) {
 /// Regex matching URL path parameters like `{user_id}`.
 static PATH_PARAM_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{(\w+)\}").expect("static regex"));
+
+/// Percent-encode a path segment value (RFC 3986 unreserved chars pass through).
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
 
 /// Extract path parameter names from a URL pattern like `/users/{user_id}`.
 fn extract_path_params(url_path: &str) -> HashSet<String> {
@@ -220,7 +233,10 @@ impl Module for ProxyModule {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    actual_path = actual_path.replace(&format!("{{{key}}}"), &val_str);
+                    actual_path = actual_path.replace(
+                        &format!("{{{key}}}"),
+                        &percent_encode_path_segment(&val_str),
+                    );
                 } else if self.http_method == "GET" {
                     let val_str = match value {
                         serde_json::Value::String(s) => s.clone(),
