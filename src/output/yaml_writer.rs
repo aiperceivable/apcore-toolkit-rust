@@ -4,6 +4,7 @@
 // apcore::BindingLoader.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -75,14 +76,19 @@ impl YAMLWriter {
             // Path traversal protection
             if !file_path.starts_with(&output_path) {
                 warn!(
-                    "Skipping file outside output directory: {}",
-                    file_path.display()
+                    file_path = %file_path.display(),
+                    "Skipping file outside output directory (path traversal guard)"
                 );
+                results.push(WriteResult::failed(
+                    module.module_id.clone(),
+                    Some(file_path.display().to_string()),
+                    "path traversal guard: computed path escapes output directory".into(),
+                ));
                 continue;
             }
 
             if file_path.exists() {
-                warn!("Overwriting existing file: {}", file_path.display());
+                warn!(file_path = %file_path.display(), "Overwriting existing file");
             }
 
             let header = format!(
@@ -92,10 +98,25 @@ impl YAMLWriter {
             );
             let yaml_content = serde_yaml_ng::to_string(&binding_data)
                 .map_err(|e| WriteError::new(file_path.display().to_string(), e.to_string()))?;
+            let full_content = format!("{header}{yaml_content}");
 
-            fs::write(&file_path, format!("{header}{yaml_content}"))
+            // Atomic write: write to a temp file in the same directory then rename.
+            // fs::rename on the same filesystem is atomic on POSIX; on Windows it
+            // replaces any existing target atomically on NTFS.
+            let tmp_path = file_path.with_extension("yaml.tmp");
+            {
+                let mut tmp_file = fs::File::create(&tmp_path)
+                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
+                tmp_file
+                    .write_all(full_content.as_bytes())
+                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
+                tmp_file
+                    .flush()
+                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
+            }
+            fs::rename(&tmp_path, &file_path)
                 .map_err(|e| WriteError::new(file_path.display().to_string(), e.to_string()))?;
-            debug!("Written: {}", file_path.display());
+            debug!(file_path = %file_path.display(), "Written");
 
             let mut result =
                 WriteResult::with_path(module.module_id.clone(), file_path.display().to_string());
@@ -177,6 +198,12 @@ fn build_binding(module: &ScannedModule) -> serde_json::Value {
         "metadata".into(),
         serde_json::to_value(&module.metadata).unwrap_or(serde_json::json!({})),
     );
+    if let Some(alias) = &module.suggested_alias {
+        binding.insert(
+            "suggested_alias".into(),
+            serde_json::Value::from(alias.clone()),
+        );
+    }
     binding.insert("input_schema".into(), module.input_schema.clone());
     binding.insert("output_schema".into(), module.output_schema.clone());
     if let Some(display) = &module.display {
@@ -510,5 +537,77 @@ mod tests {
         let content_v2 = fs::read_to_string(file_path_v2).unwrap();
         assert!(content_v2.contains("Version 2"));
         assert!(!content_v2.contains("Version 1"));
+    }
+
+    #[test]
+    fn test_suggested_alias_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let mut module = sample_module();
+        module.suggested_alias = Some("users.get".into());
+        let results = writer
+            .write(&[module], dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+        let file_path = results[0].path.as_ref().unwrap();
+        let content = fs::read_to_string(file_path).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).unwrap();
+        let bindings = parsed["bindings"].as_sequence().unwrap();
+        assert_eq!(
+            bindings[0]["suggested_alias"]
+                .as_str()
+                .expect("suggested_alias should be a string"),
+            "users.get"
+        );
+    }
+
+    #[test]
+    fn test_suggested_alias_absent_when_none() {
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let module = sample_module();
+        let results = writer
+            .write(&[module], dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+        let file_path = results[0].path.as_ref().unwrap();
+        let content = fs::read_to_string(file_path).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content).unwrap();
+        let bindings = parsed["bindings"].as_sequence().unwrap();
+        assert!(
+            bindings[0].get("suggested_alias").is_none(),
+            "suggested_alias should be absent when module.suggested_alias is None"
+        );
+    }
+
+    #[test]
+    fn test_custom_verifier_failure_produces_failed_result() {
+        use crate::output::types::{Verifier, VerifyResult};
+
+        struct AlwaysFail;
+        impl Verifier for AlwaysFail {
+            fn verify(&self, _path: &str, _module_id: &str) -> VerifyResult {
+                VerifyResult::fail("intentional failure".into())
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let module = sample_module();
+        let verifier = AlwaysFail;
+        let verifiers: &[&dyn Verifier] = &[&verifier];
+        let results = writer
+            .write(
+                &[module],
+                dir.path().to_str().unwrap(),
+                false,
+                true,
+                Some(verifiers),
+            )
+            .unwrap();
+        assert!(!results[0].verified, "result should be marked not verified");
+        assert!(results[0]
+            .verification_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("intentional failure"));
     }
 }

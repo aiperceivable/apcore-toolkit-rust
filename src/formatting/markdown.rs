@@ -377,16 +377,35 @@ fn render_table(items: &[&(String, Value)], lines: &mut Vec<String>) {
 }
 
 fn compact_repr(value: &Value, max_len: usize) -> String {
+    compact_repr_inner(value, max_len, 0)
+}
+
+fn compact_repr_inner(value: &Value, max_len: usize, depth: usize) -> String {
+    // Guard against deeply-nested values reaching compact_repr after the
+    // primary render_dict/render_list cap fires.  Without this, adversarial
+    // input can still stack-overflow inside compact_repr even though
+    // MAX_DEPTH_HARD_CAP is enforced at the top level.
+    if depth >= MAX_DEPTH_HARD_CAP {
+        return match value {
+            Value::Object(_) => "{...}".into(),
+            Value::Array(_) => "[...]".into(),
+            _ => format_scalar(value),
+        };
+    }
+
     let text = match value {
         Value::Object(obj) => {
             let parts: Vec<String> = obj
                 .iter()
-                .map(|(k, v)| format!("{k}: {}", compact_repr(v, 30)))
+                .map(|(k, v)| format!("{k}: {}", compact_repr_inner(v, 30, depth + 1)))
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
         Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(|v| compact_repr(v, 30)).collect();
+            let parts: Vec<String> = arr
+                .iter()
+                .map(|v| compact_repr_inner(v, 30, depth + 1))
+                .collect();
             format!("[{}]", parts.join(", "))
         }
         _ => format_scalar(value),
@@ -590,14 +609,18 @@ mod tests {
         assert!(result.ends_with("..."));
     }
 
-    /// Regression guard for D3-2: even with `max_depth = usize::MAX`,
-    /// a pathologically deep Value must not stack-overflow. The effective
-    /// recursion bound is `MAX_DEPTH_HARD_CAP` (32).
+    /// Regression guard: even with `max_depth = usize::MAX` and a deeply
+    /// nested Value, `to_markdown` must never stack-overflow.  The guard
+    /// covers both the primary render_dict/render_list recursion (bounded
+    /// by MAX_DEPTH_HARD_CAP) AND compact_repr (which is the terminal
+    /// renderer once the primary cap fires — also now bounded).
+    /// Uses 100 000 levels to ensure compact_repr's own cap is exercised,
+    /// not just the render_dict cap.
     #[test]
     fn test_to_markdown_deep_recursion_bounded() {
-        // Build a 500-level-deep nested object.
+        // Build a 100 000-level-deep nested object.
         let mut data = json!({"leaf": "bottom"});
-        for i in 0..500 {
+        for i in 0..100_000 {
             let key = format!("lvl_{i}");
             data = json!({ key: data });
         }
@@ -607,13 +630,11 @@ mod tests {
             ..Default::default()
         };
 
-        // Must return Ok without stack-overflow. We don't assert on the
-        // rendered content — the important contract is "no panic, no
-        // overflow" at the clamp boundary.
+        // Must return Ok without stack-overflow.
         let result = to_markdown(&data, &opts);
         assert!(
             result.is_ok(),
-            "to_markdown with max_depth=usize::MAX must not panic on deep input; got: {result:?}",
+            "to_markdown must not panic on 100k-deep input; got: {result:?}",
         );
     }
 
