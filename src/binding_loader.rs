@@ -20,6 +20,20 @@ use crate::types::ScannedModule;
 
 const SUPPORTED_SPEC_VERSIONS: &[&str] = &["1.0"];
 
+/// Maximum size of a single `.binding.yaml` file (16 MiB).
+///
+/// A binding file is a structured YAML document, not a data store.
+/// Files larger than this are almost certainly pathological and would
+/// cause the full content to be loaded into memory twice (raw bytes +
+/// serde_yaml_ng::Value + serde_json::Value).
+const MAX_BINDING_FILE_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Maximum number of `.binding.yaml` files loaded from a single directory.
+///
+/// Prevents a maliciously large directory from causing unbounded memory
+/// consumption in `load_data` callers that accumulate results.
+const MAX_BINDING_FILES_PER_DIR: usize = 10_000;
+
 // TODO(release-gate): deep-chain parity with Python/TypeScript BindingLoader — manual
 // cross-SDK review required before tagging 0.5.0. D11 audit was inconclusive due to
 // sub-agent file access limits. BindingLoader is the flagship 0.5.0 cross-SDK feature.
@@ -30,6 +44,14 @@ pub enum BindingLoadError {
     /// The path does not exist or cannot be stat'd.
     #[error("path does not exist: {path}")]
     PathNotFound { path: String },
+
+    /// A binding file exceeds the maximum allowed size.
+    #[error("binding file {path} is too large ({size} bytes > {max} byte limit)")]
+    FileTooLarge { path: String, size: u64, max: u64 },
+
+    /// The directory contains more binding files than the per-directory limit.
+    #[error("directory {path} contains more than {max} binding files")]
+    TooManyFiles { path: String, max: usize },
 
     /// Failure reading a binding file from disk.
     #[error("failed to read {path}: {source}")]
@@ -173,8 +195,28 @@ impl BindingLoader {
             });
         };
 
+        if files.len() > MAX_BINDING_FILES_PER_DIR {
+            return Err(BindingLoadError::TooManyFiles {
+                path: path.display().to_string(),
+                max: MAX_BINDING_FILES_PER_DIR,
+            });
+        }
+
         let mut modules: Vec<ScannedModule> = Vec::new();
         for f in files {
+            let file_size = fs::metadata(&f)
+                .map_err(|e| BindingLoadError::FileRead {
+                    path: f.display().to_string(),
+                    source: e,
+                })?
+                .len();
+            if file_size > MAX_BINDING_FILE_SIZE {
+                return Err(BindingLoadError::FileTooLarge {
+                    path: f.display().to_string(),
+                    size: file_size,
+                    max: MAX_BINDING_FILE_SIZE,
+                });
+            }
             let content = fs::read_to_string(&f).map_err(|e| BindingLoadError::FileRead {
                 path: f.display().to_string(),
                 source: e,
@@ -711,6 +753,28 @@ mod tests {
             .unwrap()[0];
         assert_eq!(m.examples.len(), 1);
         assert_eq!(m.examples[0].title, "happy");
+    }
+
+    #[test]
+    fn test_file_too_large_error_variant() {
+        // Verify the FileTooLarge variant can be constructed and displays correctly.
+        // The actual 16 MiB threshold is impractical to trigger in a unit test
+        // (we'd need to write a 16 MiB file), but this test confirms the error
+        // type is wired up and the display message is sensible.
+        let err = BindingLoadError::FileTooLarge {
+            path: "/bindings/huge.binding.yaml".to_string(),
+            size: MAX_BINDING_FILE_SIZE + 1,
+            max: MAX_BINDING_FILE_SIZE,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("too large"),
+            "message should mention size: {msg}"
+        );
+        assert!(
+            msg.contains("huge.binding.yaml"),
+            "message should mention path: {msg}"
+        );
     }
 
     #[test]

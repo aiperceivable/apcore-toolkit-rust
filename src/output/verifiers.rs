@@ -17,6 +17,9 @@ pub struct SyntaxVerifier;
 
 impl Verifier for SyntaxVerifier {
     fn verify(&self, path: &str, _module_id: &str) -> VerifyResult {
+        if path.is_empty() {
+            return VerifyResult::ok();
+        }
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
@@ -38,6 +41,9 @@ pub struct YAMLVerifier;
 
 impl Verifier for YAMLVerifier {
     fn verify(&self, path: &str, _module_id: &str) -> VerifyResult {
+        if path.is_empty() {
+            return VerifyResult::ok();
+        }
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
@@ -96,6 +102,9 @@ impl Default for JSONVerifier {
 
 impl Verifier for JSONVerifier {
     fn verify(&self, path: &str, _module_id: &str) -> VerifyResult {
+        if path.is_empty() {
+            return VerifyResult::ok();
+        }
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
@@ -122,6 +131,9 @@ impl MagicBytesVerifier {
 
 impl Verifier for MagicBytesVerifier {
     fn verify(&self, path: &str, _module_id: &str) -> VerifyResult {
+        if path.is_empty() {
+            return VerifyResult::ok();
+        }
         let content = match fs::read(path) {
             Ok(c) => c,
             Err(e) => return VerifyResult::fail(format!("Cannot read file: {e}")),
@@ -209,6 +221,29 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    // ---- empty-path contract (RegistryWriter compatibility) ----
+
+    #[test]
+    fn test_syntax_verifier_empty_path_passes() {
+        assert!(SyntaxVerifier.verify("", "mod").ok);
+    }
+
+    #[test]
+    fn test_yaml_verifier_empty_path_passes() {
+        assert!(YAMLVerifier.verify("", "mod").ok);
+    }
+
+    #[test]
+    fn test_json_verifier_empty_path_passes() {
+        assert!(JSONVerifier::new().verify("", "mod").ok);
+    }
+
+    #[test]
+    fn test_magic_bytes_verifier_empty_path_passes() {
+        let v = MagicBytesVerifier::new(b"PNG".to_vec());
+        assert!(v.verify("", "mod").ok);
+    }
 
     #[test]
     fn test_yaml_verifier_valid() {

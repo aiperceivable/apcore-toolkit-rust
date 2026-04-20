@@ -112,6 +112,14 @@ impl RegistryWriter {
     /// - `dry_run`: If true, skip registration and return results only.
     /// - `verify`: If true, verify modules are retrievable after registration.
     /// - `verifiers`: Optional custom verifiers run after the built-in check.
+    ///
+    /// # Verifier contract for registry-based modules
+    ///
+    /// Registry modules have no output file, so custom verifiers receive
+    /// `path = ""`. Built-in file-based verifiers (`YAMLVerifier`, `JSONVerifier`,
+    /// etc.) skip gracefully when path is empty. Custom verifiers must also
+    /// handle `path = ""` without erroring — use `module_id` for any
+    /// registry-based checks.
     pub fn write(
         &self,
         modules: &[ScannedModule],

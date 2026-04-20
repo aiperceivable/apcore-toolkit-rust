@@ -37,7 +37,7 @@ pub mod types;
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
 pub use binding_loader::{BindingLoadError, BindingLoader};
 pub use display::{DisplayResolver, DisplayResolverError};
-pub use formatting::{to_markdown, MarkdownOptions};
+pub use formatting::{to_markdown, MarkdownError, MarkdownOptions};
 pub use http_verb_map::{
     generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
 };
@@ -53,7 +53,7 @@ pub use output::verifiers::{
 };
 pub use output::yaml_writer::YAMLWriter;
 pub use output::{get_writer, OutputFormat, OutputFormatError};
-pub use resolve_target::{resolve_target, ResolvedTarget};
+pub use resolve_target::{resolve_target, ResolveTargetError, ResolvedTarget};
 pub use scanner::{deduplicate_ids, filter_modules, infer_annotations_from_method, BaseScanner};
 pub use schema_utils::enrich_schema_descriptions;
 pub use serializers::{annotations_to_dict, module_to_dict, modules_to_dicts};

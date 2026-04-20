@@ -2,4 +2,4 @@
 
 mod markdown;
 
-pub use markdown::{to_markdown, MarkdownOptions};
+pub use markdown::{to_markdown, MarkdownError, MarkdownOptions};

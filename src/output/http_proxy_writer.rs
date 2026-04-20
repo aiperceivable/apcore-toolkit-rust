@@ -178,6 +178,24 @@ fn get_http_fields(module: &ScannedModule) -> (String, String) {
 static PATH_PARAM_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{(\w+)\}").expect("static regex"));
 
+/// Validate that all `{param}` placeholders in `actual_path` were substituted.
+///
+/// Returns `Err` with the list of still-unfilled parameter names if any remain.
+fn validate_path_params_filled(actual_path: &str) -> Result<(), String> {
+    if PATH_PARAM_RE.is_match(actual_path) {
+        let unfilled: Vec<&str> = PATH_PARAM_RE
+            .captures_iter(actual_path)
+            .filter_map(|cap| cap.get(1).map(|m| m.as_str()))
+            .collect();
+        Err(format!(
+            "Missing required path parameters {:?} — inputs must supply values for all path params in '{actual_path}'",
+            unfilled
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Percent-encode a path segment value (RFC 3986 unreserved chars pass through).
 fn percent_encode_path_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -290,6 +308,13 @@ impl Module for ProxyModule {
                     body.insert(key.clone(), value.clone());
                 }
             }
+        }
+
+        if let Err(msg) = validate_path_params_filled(&actual_path) {
+            return Err(ModuleError::new(
+                apcore::errors::ErrorCode::ModuleExecuteError,
+                msg,
+            ));
         }
 
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), actual_path);
@@ -485,6 +510,35 @@ mod tests {
         let body = "x".repeat(300);
         let result = extract_error_message(&body);
         assert_eq!(result.len(), 200);
+    }
+
+    #[test]
+    fn test_validate_path_params_filled_no_placeholders() {
+        assert!(validate_path_params_filled("/users/123/tasks/456").is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_params_filled_static_path() {
+        assert!(validate_path_params_filled("/health").is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_params_filled_unfilled_placeholder() {
+        let result = validate_path_params_filled("/users/{user_id}/tasks");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("user_id"),
+            "error should name the unfilled param: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_path_params_filled_multiple_unfilled() {
+        let result = validate_path_params_filled("/users/{user_id}/tasks/{task_id}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("user_id") || msg.contains("task_id"), "{msg}");
     }
 
     #[test]

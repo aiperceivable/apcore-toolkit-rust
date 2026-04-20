@@ -6,8 +6,21 @@
 use serde_json::{json, Value};
 use tracing::warn;
 
+/// Decode a JSON Pointer token per RFC 6901.
+///
+/// `~1` → `/` and `~0` → `~` (order matters — `~1` must be decoded before `~0`
+/// to prevent `~01` from becoming `/` instead of `~1`).
+fn decode_pointer_token(token: &str) -> std::borrow::Cow<'_, str> {
+    if token.contains('~') {
+        std::borrow::Cow::Owned(token.replace("~1", "/").replace("~0", "~"))
+    } else {
+        std::borrow::Cow::Borrowed(token)
+    }
+}
+
 /// Resolve a JSON `$ref` pointer like `#/components/schemas/Foo`.
 ///
+/// Decodes RFC 6901 escape sequences in path segments (`~1` → `/`, `~0` → `~`).
 /// Returns the resolved schema, or an empty object on failure.
 pub fn resolve_ref(ref_string: &str, openapi_doc: &Value) -> Value {
     if !ref_string.starts_with("#/") {
@@ -22,7 +35,8 @@ pub fn resolve_ref(ref_string: &str, openapi_doc: &Value) -> Value {
     let mut current = openapi_doc;
 
     for part in parts {
-        match current.get(part) {
+        let decoded = decode_pointer_token(part);
+        match current.get(decoded.as_ref()) {
             Some(next) => current = next,
             None => {
                 warn!(
@@ -56,7 +70,9 @@ pub fn resolve_schema(schema: &Value, openapi_doc: Option<&Value>) -> Value {
 
 /// Recursively resolve all `$ref` pointers in a schema.
 ///
-/// Handles nested `$ref`, `allOf`, `anyOf`, `oneOf`, `items`, and `properties`.
+/// Handles `$ref`, `allOf`, `anyOf`, `oneOf`, `items`, `prefixItems`,
+/// `properties`, `patternProperties`, `additionalProperties`, `not`,
+/// and `if`/`then`/`else`.
 /// Depth-limited to 16 levels to prevent infinite recursion.
 pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> Value {
     if depth >= 16 {
@@ -84,14 +100,29 @@ pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> V
             }
         }
 
-        // Resolve array items
+        // Resolve array items (single schema) and tuple items (array of schemas)
         if let Some(items) = obj.get("items").cloned() {
             if items.is_object() {
                 obj.insert(
                     "items".to_string(),
                     deep_resolve_refs(&items, openapi_doc, depth + 1),
                 );
+            } else if let Value::Array(arr) = items {
+                let resolved: Vec<Value> = arr
+                    .iter()
+                    .map(|item| deep_resolve_refs(item, openapi_doc, depth + 1))
+                    .collect();
+                obj.insert("items".to_string(), Value::Array(resolved));
             }
+        }
+
+        // Resolve prefixItems (JSON Schema 2020-12 tuple items)
+        if let Some(Value::Array(prefix)) = obj.get("prefixItems").cloned() {
+            let resolved: Vec<Value> = prefix
+                .iter()
+                .map(|item| deep_resolve_refs(item, openapi_doc, depth + 1))
+                .collect();
+            obj.insert("prefixItems".to_string(), Value::Array(resolved));
         }
 
         // Resolve nested properties
@@ -101,6 +132,37 @@ pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> V
                 .map(|(k, v)| (k, deep_resolve_refs(&v, openapi_doc, depth + 1)))
                 .collect();
             obj.insert("properties".to_string(), Value::Object(resolved));
+        }
+
+        // Resolve patternProperties (same shape as properties but keyed by regex)
+        if let Some(Value::Object(pat_props)) = obj.get("patternProperties").cloned() {
+            let resolved: serde_json::Map<String, Value> = pat_props
+                .into_iter()
+                .map(|(k, v)| (k, deep_resolve_refs(&v, openapi_doc, depth + 1)))
+                .collect();
+            obj.insert("patternProperties".to_string(), Value::Object(resolved));
+        }
+
+        // Resolve additionalProperties when it is a schema (not a boolean)
+        if let Some(add_props) = obj.get("additionalProperties").cloned() {
+            if add_props.is_object() {
+                obj.insert(
+                    "additionalProperties".to_string(),
+                    deep_resolve_refs(&add_props, openapi_doc, depth + 1),
+                );
+            }
+        }
+
+        // Resolve not / if / then / else (applicator keywords)
+        for key in &["not", "if", "then", "else"] {
+            if let Some(sub) = obj.get(*key).cloned() {
+                if sub.is_object() {
+                    obj.insert(
+                        key.to_string(),
+                        deep_resolve_refs(&sub, openapi_doc, depth + 1),
+                    );
+                }
+            }
         }
     }
 
@@ -167,6 +229,13 @@ pub fn extract_input_schema(operation: &Value, openapi_doc: Option<&Value>) -> V
         properties = resolved_props;
     }
 
+    // Deduplicate required list while preserving order (params + body can overlap)
+    let mut seen = std::collections::HashSet::new();
+    required.retain(|v| {
+        let key = v.as_str().unwrap_or("").to_string();
+        seen.insert(key)
+    });
+
     json!({
         "type": "object",
         "properties": Value::Object(properties),
@@ -204,6 +273,123 @@ pub fn extract_output_schema(operation: &Value, openapi_doc: Option<&Value>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_ref_rfc6901_slash_in_key() {
+        // Key name "schemas/v2" encoded as "schemas~1v2" in the pointer.
+        let doc = json!({
+            "schemas/v2": {"type": "string"}
+        });
+        let result = resolve_ref("#/schemas~1v2", &doc);
+        assert_eq!(result["type"], "string");
+    }
+
+    #[test]
+    fn test_resolve_ref_rfc6901_tilde_in_key() {
+        // Key name "a~b" encoded as "a~0b" in the pointer.
+        let doc = json!({
+            "a~b": {"type": "number"}
+        });
+        let result = resolve_ref("#/a~0b", &doc);
+        assert_eq!(result["type"], "number");
+    }
+
+    #[test]
+    fn test_resolve_ref_rfc6901_combined_escapes() {
+        // "~01" should decode to "~1" (not "/"), per RFC 6901 §3.
+        let doc = json!({
+            "~1": {"type": "boolean"}
+        });
+        let result = resolve_ref("#/~01", &doc);
+        assert_eq!(result["type"], "boolean");
+    }
+
+    #[test]
+    fn test_deep_resolve_refs_additional_properties() {
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Tag": {"type": "string"}
+                }
+            }
+        });
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": {"$ref": "#/components/schemas/Tag"}
+        });
+        let result = deep_resolve_refs(&schema, &doc, 0);
+        assert_eq!(result["additionalProperties"]["type"], "string");
+    }
+
+    #[test]
+    fn test_deep_resolve_refs_not_keyword() {
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Forbidden": {"type": "string"}
+                }
+            }
+        });
+        let schema = json!({
+            "not": {"$ref": "#/components/schemas/Forbidden"}
+        });
+        let result = deep_resolve_refs(&schema, &doc, 0);
+        assert_eq!(result["not"]["type"], "string");
+    }
+
+    #[test]
+    fn test_deep_resolve_refs_if_then_else() {
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Condition": {"type": "boolean"},
+                    "TrueCase": {"type": "string"},
+                    "FalseCase": {"type": "number"}
+                }
+            }
+        });
+        let schema = json!({
+            "if": {"$ref": "#/components/schemas/Condition"},
+            "then": {"$ref": "#/components/schemas/TrueCase"},
+            "else": {"$ref": "#/components/schemas/FalseCase"}
+        });
+        let result = deep_resolve_refs(&schema, &doc, 0);
+        assert_eq!(result["if"]["type"], "boolean");
+        assert_eq!(result["then"]["type"], "string");
+        assert_eq!(result["else"]["type"], "number");
+    }
+
+    #[test]
+    fn test_extract_input_schema_deduplicates_required() {
+        // Both params and body declare the same field as required — should dedup.
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Body": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}},
+                        "required": ["id"]
+                    }
+                }
+            }
+        });
+        let op = json!({
+            "parameters": [
+                {"name": "id", "in": "path", "required": true, "schema": {"type": "integer"}}
+            ],
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/Body"}
+                    }
+                }
+            }
+        });
+        let result = extract_input_schema(&op, Some(&doc));
+        let req = result["required"].as_array().unwrap();
+        let id_count = req.iter().filter(|v| v.as_str() == Some("id")).count();
+        assert_eq!(id_count, 1, "required list should deduplicate; got {req:?}");
+    }
 
     #[test]
     fn test_resolve_ref_basic() {

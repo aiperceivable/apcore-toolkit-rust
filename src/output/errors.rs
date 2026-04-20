@@ -10,12 +10,32 @@ pub struct WriteError {
     pub path: String,
     /// Description of the underlying error.
     pub cause: String,
+    /// Underlying I/O error, when available.
+    ///
+    /// Preserves `io::Error` kind and errno so callers can inspect the root
+    /// cause. `None` for non-I/O errors (e.g. YAML serialization failures).
+    #[source]
+    pub io_source: Option<std::io::Error>,
 }
 
 impl WriteError {
-    /// Create a new WriteError.
+    /// Create a WriteError without an I/O source (e.g. for serialization failures).
     pub fn new(path: String, cause: String) -> Self {
-        Self { path, cause }
+        Self {
+            path,
+            cause,
+            io_source: None,
+        }
+    }
+
+    /// Create a WriteError wrapping an I/O error, preserving the source chain.
+    pub fn io(path: String, source: std::io::Error) -> Self {
+        let cause = source.to_string();
+        Self {
+            path,
+            cause,
+            io_source: Some(source),
+        }
     }
 }
 
@@ -40,11 +60,33 @@ mod tests {
     }
 
     #[test]
-    fn test_write_error_is_std_error() {
+    fn test_write_error_new_source_is_none() {
         let err = WriteError::new("/file".into(), "io error".into());
-        // Verify it implements std::error::Error (source returns None by default)
         let std_err: &dyn std::error::Error = &err;
         assert!(std_err.source().is_none());
+    }
+
+    #[test]
+    fn test_write_error_io_source_is_some() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let err = WriteError::io("/file".into(), io_err);
+        let std_err: &dyn std::error::Error = &err;
+        assert!(
+            std_err.source().is_some(),
+            "WriteError::io should expose the I/O error as source()"
+        );
+        assert_eq!(err.path, "/file");
+        assert_eq!(err.cause, "access denied");
+    }
+
+    #[test]
+    fn test_write_error_io_display() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err = WriteError::io("/missing.yaml".into(), io_err);
+        assert_eq!(
+            err.to_string(),
+            "Failed to write /missing.yaml: no such file"
+        );
     }
 
     #[test]

@@ -157,15 +157,22 @@ pub fn deduplicate_ids(modules: Vec<ScannedModule>) -> Vec<ScannedModule> {
 /// Infer behavioral annotations from an HTTP method.
 ///
 /// Mapping:
-/// - GET    -> readonly=true, cacheable=true
-/// - DELETE -> destructive=true
-/// - PUT    -> idempotent=true
-/// - Others -> default (all false)
+/// - GET     -> readonly=true, cacheable=true
+/// - HEAD    -> readonly=true (inspection-only, no body)
+/// - OPTIONS -> readonly=true (metadata query, no mutation)
+/// - DELETE  -> destructive=true
+/// - PUT     -> idempotent=true
+/// - POST    -> default (all false; creates resources, not idempotent by spec)
+/// - PATCH   -> default (partial update, not standardly idempotent)
 pub fn infer_annotations_from_method(method: &str) -> ModuleAnnotations {
     match method.to_uppercase().as_str() {
         "GET" => ModuleAnnotations {
             readonly: true,
             cacheable: true,
+            ..Default::default()
+        },
+        "HEAD" | "OPTIONS" => ModuleAnnotations {
+            readonly: true,
             ..Default::default()
         },
         "DELETE" => ModuleAnnotations {
@@ -397,6 +404,29 @@ mod tests {
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
         assert!(!ann.cacheable);
+    }
+
+    #[test]
+    fn test_infer_annotations_head() {
+        let ann = infer_annotations_from_method("HEAD");
+        assert!(ann.readonly, "HEAD should be readonly");
+        assert!(!ann.cacheable, "HEAD should not be cacheable (no body)");
+        assert!(!ann.destructive);
+        assert!(!ann.idempotent);
+    }
+
+    #[test]
+    fn test_infer_annotations_options() {
+        let ann = infer_annotations_from_method("OPTIONS");
+        assert!(ann.readonly, "OPTIONS should be readonly");
+        assert!(!ann.destructive);
+        assert!(!ann.idempotent);
+    }
+
+    #[test]
+    fn test_infer_annotations_head_case_insensitive() {
+        let ann = infer_annotations_from_method("head");
+        assert!(ann.readonly);
     }
 
     #[test]

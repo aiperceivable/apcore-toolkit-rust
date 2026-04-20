@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// A parsed target reference with module path and qualified name components.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,35 +48,94 @@ pub struct ResolvedTarget {
 /// assert_eq!(result.module_path, "my_module");
 /// assert_eq!(result.qualname, "my_func");
 /// ```
+/// Errors returned by [`resolve_target`].
+#[derive(Debug, Error)]
+pub enum ResolveTargetError {
+    #[error("Invalid target format: \"{target}\". Expected \"module_path:qualname\".")]
+    MissingSeparator { target: String },
+
+    #[error("Invalid target format: \"{target}\". Module path is empty.")]
+    EmptyModulePath { target: String },
+
+    #[error("Invalid target format: \"{target}\". Qualified name is empty.")]
+    EmptyQualname { target: String },
+
+    #[error("Invalid qualname \"{qualname}\" in target \"{target}\". Must be a valid identifier.")]
+    InvalidQualname { target: String, qualname: String },
+
+    #[error("Invalid module path \"{module_path}\" in target \"{target}\": {reason}.")]
+    InvalidModulePath {
+        target: String,
+        module_path: String,
+        reason: String,
+    },
+}
+
+/// Maximum allowed length for the module_path component.
+const MAX_MODULE_PATH_LEN: usize = 512;
+
 /// Regex matching valid identifier qualnames (alphanumeric + underscores, no leading digit).
 static IDENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("static regex"));
 
-pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
-    let last_colon = target.rfind(':').ok_or_else(|| {
-        format!("Invalid target format: \"{target}\". Expected \"module_path:qualname\".")
-    })?;
+/// Validate the module path component for dangerous content.
+fn validate_module_path(module_path: &str, target: &str) -> Result<(), ResolveTargetError> {
+    if module_path.len() > MAX_MODULE_PATH_LEN {
+        return Err(ResolveTargetError::InvalidModulePath {
+            target: target.to_string(),
+            module_path: module_path.to_string(),
+            reason: format!("exceeds maximum length of {MAX_MODULE_PATH_LEN}"),
+        });
+    }
+    if module_path
+        .bytes()
+        .any(|b| b == 0 || (b < 0x20 && b != b'\t'))
+    {
+        return Err(ResolveTargetError::InvalidModulePath {
+            target: target.to_string(),
+            module_path: module_path.to_string(),
+            reason: "contains invalid control characters".to_string(),
+        });
+    }
+    if module_path.contains("..") {
+        return Err(ResolveTargetError::InvalidModulePath {
+            target: target.to_string(),
+            module_path: module_path.to_string(),
+            reason: "contains '..' (path traversal)".to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub fn resolve_target(target: &str) -> Result<ResolvedTarget, ResolveTargetError> {
+    let last_colon = target
+        .rfind(':')
+        .ok_or_else(|| ResolveTargetError::MissingSeparator {
+            target: target.to_string(),
+        })?;
 
     let module_path = &target[..last_colon];
     let qualname = &target[last_colon + 1..];
 
     if module_path.is_empty() {
-        return Err(format!(
-            "Invalid target format: \"{target}\". Module path is empty."
-        ));
+        return Err(ResolveTargetError::EmptyModulePath {
+            target: target.to_string(),
+        });
     }
 
     if qualname.is_empty() {
-        return Err(format!(
-            "Invalid target format: \"{target}\". Qualified name is empty."
-        ));
+        return Err(ResolveTargetError::EmptyQualname {
+            target: target.to_string(),
+        });
     }
 
+    validate_module_path(module_path, target)?;
+
     if !IDENT_RE.is_match(qualname) {
-        return Err(format!(
-            "Invalid qualname \"{qualname}\" in target \"{target}\". \
-             Must be a valid identifier."
-        ));
+        return Err(ResolveTargetError::InvalidQualname {
+            target: target.to_string(),
+            qualname: qualname.to_string(),
+        });
     }
 
     Ok(ResolvedTarget {
@@ -120,28 +180,71 @@ mod tests {
     fn test_resolve_target_no_colon() {
         let result = resolve_target("no_colon_here");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid target format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid target format"));
     }
 
     #[test]
     fn test_resolve_target_empty_module() {
         let result = resolve_target(":qualname");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Module path is empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Module path is empty"));
     }
 
     #[test]
     fn test_resolve_target_empty_qualname() {
         let result = resolve_target("module:");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Qualified name is empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Qualified name is empty"));
     }
 
     #[test]
     fn test_resolve_target_invalid_qualname() {
         let result = resolve_target("module:123invalid");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Must be a valid identifier"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Must be a valid identifier"));
+    }
+
+    #[test]
+    fn test_resolve_target_module_path_with_null_byte() {
+        let result = resolve_target("mod\x00path:func");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("control characters"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_target_module_path_too_long() {
+        let long_path = "a".repeat(513);
+        let result = resolve_target(&format!("{long_path}:func"));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("maximum length"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_target_module_path_with_dotdot() {
+        let result = resolve_target("../../../etc/passwd:func");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("path traversal"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_target_module_path_dotdot_in_middle() {
+        let result = resolve_target("a/b/../c:func");
+        assert!(result.is_err());
     }
 
     #[test]

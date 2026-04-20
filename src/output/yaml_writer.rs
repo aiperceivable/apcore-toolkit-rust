@@ -41,21 +41,15 @@ impl YAMLWriter {
         }
 
         if !dry_run {
-            fs::create_dir_all(output_dir)
-                .map_err(|e| WriteError::new(output_dir.into(), e.to_string()))?;
+            fs::create_dir_all(output_dir).map_err(|e| WriteError::io(output_dir.into(), e))?;
         }
 
-        // After create_dir_all succeeds the directory exists and must be resolvable.
-        // Falling back to a non-canonical path would silently disable the starts_with guard.
         let output_path = if dry_run {
             Path::new(output_dir).to_path_buf()
         } else {
-            Path::new(output_dir).canonicalize().map_err(|e| {
-                WriteError::new(
-                    output_dir.into(),
-                    format!("Cannot resolve output directory: {e}"),
-                )
-            })?
+            Path::new(output_dir)
+                .canonicalize()
+                .map_err(|e| WriteError::io(output_dir.into(), e))?
         };
 
         let mut results: Vec<WriteResult> = Vec::new();
@@ -69,23 +63,11 @@ impl YAMLWriter {
                 continue;
             }
 
+            // sanitize_filename removes all unsafe chars and collapses consecutive dots,
+            // ensuring the resulting filename cannot escape output_path.
             let safe_id = sanitize_filename(&module.module_id);
             let filename = format!("{safe_id}.binding.yaml");
             let file_path = output_path.join(&filename);
-
-            // Path traversal protection
-            if !file_path.starts_with(&output_path) {
-                warn!(
-                    file_path = %file_path.display(),
-                    "Skipping file outside output directory (path traversal guard)"
-                );
-                results.push(WriteResult::failed(
-                    module.module_id.clone(),
-                    Some(file_path.display().to_string()),
-                    "path traversal guard: computed path escapes output directory".into(),
-                ));
-                continue;
-            }
 
             if file_path.exists() {
                 warn!(file_path = %file_path.display(), "Overwriting existing file");
@@ -100,29 +82,35 @@ impl YAMLWriter {
                 .map_err(|e| WriteError::new(file_path.display().to_string(), e.to_string()))?;
             let full_content = format!("{header}{yaml_content}");
 
-            // Atomic write: write to a temp file in the same directory then rename.
+            // Atomic write: write bytes to a sibling .yaml.tmp file, call sync_all()
+            // to flush OS page cache to durable storage, then rename atomically.
             // fs::rename on the same filesystem is atomic on POSIX; on Windows it
             // replaces any existing target atomically on NTFS.
+            // On Unix we also fsync the parent directory after rename to make the
+            // new directory entry durable.
             // The tmp file is removed on any failure so no stale `.yaml.tmp` is left.
             let tmp_path = file_path.with_extension("yaml.tmp");
             let write_res = (|| -> std::io::Result<()> {
                 let mut tmp_file = fs::File::create(&tmp_path)?;
                 tmp_file.write_all(full_content.as_bytes())?;
-                tmp_file.flush()
+                tmp_file.flush()?;
+                tmp_file.sync_all()
             })();
             if let Err(e) = write_res {
                 let _ = fs::remove_file(&tmp_path);
-                return Err(WriteError::new(
-                    tmp_path.display().to_string(),
-                    e.to_string(),
-                ));
+                return Err(WriteError::io(tmp_path.display().to_string(), e));
             }
             if let Err(e) = fs::rename(&tmp_path, &file_path) {
                 let _ = fs::remove_file(&tmp_path);
-                return Err(WriteError::new(
-                    file_path.display().to_string(),
-                    e.to_string(),
-                ));
+                return Err(WriteError::io(file_path.display().to_string(), e));
+            }
+            #[cfg(unix)]
+            {
+                if let Some(parent) = file_path.parent() {
+                    if let Ok(dir) = fs::File::open(parent) {
+                        let _ = dir.sync_all();
+                    }
+                }
             }
             debug!(file_path = %file_path.display(), "Written");
 

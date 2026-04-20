@@ -64,7 +64,7 @@
 
 ### Serialization
 
-- JSON: `serde_json`. YAML: `serde_yaml`.
+- JSON: `serde_json`. YAML: `serde_yaml_ng` (community-maintained fork of `serde_yaml`).
 
 ---
 

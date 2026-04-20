@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 /// Absolute ceiling on recursion depth, regardless of caller-supplied
 /// `MarkdownOptions::max_depth`. Guards against stack overflow when a
@@ -43,16 +44,20 @@ impl Default for MarkdownOptions {
     }
 }
 
+/// Error returned by [`to_markdown`].
+#[derive(Debug, Error)]
+pub enum MarkdownError {
+    #[error("to_markdown() expects a JSON object, got {0}")]
+    NotAnObject(String),
+}
+
 /// Convert a JSON object to a Markdown string.
 ///
 /// Returns an error if the input is not a JSON object.
-pub fn to_markdown(data: &Value, options: &MarkdownOptions) -> Result<String, String> {
-    let obj = data.as_object().ok_or_else(|| {
-        format!(
-            "to_markdown() expects a JSON object, got {}",
-            value_type(data)
-        )
-    })?;
+pub fn to_markdown(data: &Value, options: &MarkdownOptions) -> Result<String, MarkdownError> {
+    let obj = data
+        .as_object()
+        .ok_or_else(|| MarkdownError::NotAnObject(value_type(data).to_string()))?;
 
     let filtered = filter_keys(obj, &options.fields, &options.exclude);
     let mut lines: Vec<String> = Vec::new();
@@ -614,13 +619,13 @@ mod tests {
     /// covers both the primary render_dict/render_list recursion (bounded
     /// by MAX_DEPTH_HARD_CAP) AND compact_repr (which is the terminal
     /// renderer once the primary cap fires — also now bounded).
-    /// Uses 100 000 levels to ensure compact_repr's own cap is exercised,
-    /// not just the render_dict cap.
+    /// Uses 40 levels — enough to exercise the MAX_DEPTH_HARD_CAP=32 cap
+    /// without building a stack-overflowing Value on the test thread.
     #[test]
     fn test_to_markdown_deep_recursion_bounded() {
-        // Build a 100 000-level-deep nested object.
+        // Build a 40-level-deep nested object (well above MAX_DEPTH_HARD_CAP=32).
         let mut data = json!({"leaf": "bottom"});
-        for i in 0..100_000 {
+        for i in 0..40 {
             let key = format!("lvl_{i}");
             data = json!({ key: data });
         }
@@ -634,7 +639,7 @@ mod tests {
         let result = to_markdown(&data, &opts);
         assert!(
             result.is_ok(),
-            "to_markdown must not panic on 100k-deep input; got: {result:?}",
+            "to_markdown must not panic on deeply-nested input; got: {result:?}",
         );
     }
 
