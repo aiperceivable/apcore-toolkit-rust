@@ -52,6 +52,9 @@ pub enum AIEnhancerError {
     /// SLM returned an unparseable response.
     #[error("bad response: {0}")]
     Response(String),
+    /// Failed to build the HTTP agent.
+    #[error("agent build failed: {0}")]
+    AgentBuild(String),
 }
 
 /// Protocol for pluggable metadata enhancement.
@@ -98,6 +101,8 @@ pub struct AIEnhancer {
     pub threshold: f64,
     pub batch_size: usize,
     pub timeout: u64,
+    // Reused across all call_llm() invocations to avoid rebuilding config per call.
+    agent: ureq::Agent,
 }
 
 impl AIEnhancer {
@@ -140,12 +145,18 @@ impl AIEnhancer {
             ));
         }
 
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(timeout)))
+            .build()
+            .new_agent();
+
         Ok(Self {
             endpoint,
             model,
             threshold,
             batch_size,
             timeout,
+            agent,
         })
     }
 
@@ -264,12 +275,8 @@ impl AIEnhancer {
             "temperature": 0.1,
         });
 
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(self.timeout)))
-            .build()
-            .new_agent();
-
-        let body: Value = agent
+        let body: Value = self
+            .agent
             .post(&url)
             .header("Content-Type", "application/json")
             .send_json(&payload)
@@ -288,16 +295,18 @@ impl AIEnhancer {
     fn parse_response(response: &str) -> Result<Value, AIEnhancerError> {
         let mut text = response.trim().to_string();
 
-        // Strip markdown code fences
+        // Strip markdown code fences if the response is more than one line
         if text.starts_with("```") {
             let lines: Vec<&str> = text.split('\n').collect();
-            let start = if lines[0].starts_with("```") { 1 } else { 0 };
-            let end = if lines.last().map(|l| l.trim()) == Some("```") {
-                lines.len() - 1
-            } else {
-                lines.len()
-            };
-            text = lines[start..end].join("\n");
+            if lines.len() > 1 {
+                let start = if lines[0].starts_with("```") { 1 } else { 0 };
+                let end = if lines.last().map(|l| l.trim()) == Some("```") {
+                    lines.len() - 1
+                } else {
+                    lines.len()
+                };
+                text = lines[start..end].join("\n");
+            }
         }
 
         serde_json::from_str(&text)
@@ -576,24 +585,33 @@ fn set_bool_annotation(ann: &mut ModuleAnnotations, field: &str, value: bool) ->
 }
 
 fn parse_float_env(name: &str, default: f64) -> f64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            warn!(env_var = name, value = %v, "unparseable float env var — using default {default}");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 fn parse_usize_env(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            warn!(env_var = name, value = %v, "unparseable usize env var — using default {default}");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 fn parse_u64_env(name: &str, default: u64) -> u64 {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match env::var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            warn!(env_var = name, value = %v, "unparseable u64 env var — using default {default}");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 /// Clamp an SLM-supplied string to `max_chars` bytes, warning if truncated.
@@ -885,6 +903,23 @@ mod tests {
             "prompt should mention documentation"
         );
         assert!(prompt.contains("Markdown"));
+    }
+
+    #[test]
+    fn test_parse_response_single_line_fence_does_not_panic() {
+        // A single-line ``` response used to panic with lines[1..0].
+        let response = "```";
+        let result = AIEnhancer::parse_response(response);
+        assert!(result.is_err(), "single-line fence is not valid JSON");
+    }
+
+    #[test]
+    fn test_parse_response_backtick_only_line_treated_as_json() {
+        // Regression: must not panic, must return an error gracefully.
+        let response = "```\n```";
+        let result = AIEnhancer::parse_response(response);
+        // Empty string after stripping is invalid JSON.
+        assert!(result.is_err());
     }
 
     // ---- set_bool_annotation (serde round-trip, D4-1 regression guards) ----

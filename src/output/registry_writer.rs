@@ -220,9 +220,9 @@ impl RegistryWriter {
         }
 
         // Fallback: passthrough handler (schema-only registration)
-        warn!(
+        debug!(
             module_id = %module.module_id,
-            "RegistryWriter using passthrough handler; supply a HandlerFactory for real execution",
+            "RegistryWriter using passthrough handler (no HandlerFactory configured)",
         );
         fn passthrough<'a>(
             inputs: serde_json::Value,

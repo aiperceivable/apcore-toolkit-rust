@@ -12,6 +12,15 @@ pub mod yaml_writer;
 pub mod http_proxy_writer;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error returned by [`get_writer`] when an unrecognised format string is supplied.
+#[derive(Debug, Error, PartialEq)]
+pub enum OutputFormatError {
+    /// The format string does not map to a known [`OutputFormat`] variant.
+    #[error("Unknown output format: {0}")]
+    Unknown(String),
+}
 
 /// Supported output format variants.
 ///
@@ -25,6 +34,7 @@ pub enum OutputFormat {
     /// Register modules directly into an apcore Registry.
     Registry,
     /// Register modules as HTTP proxy modules (requires `http-proxy` feature).
+    #[cfg(feature = "http-proxy")]
     HttpProxy,
 }
 
@@ -57,12 +67,13 @@ pub enum OutputFormat {
 ///     OutputFormat::HttpProxy => { /* use HTTPProxyRegistryWriter */ }
 /// }
 /// ```
-pub fn get_writer(format: &str) -> Result<OutputFormat, String> {
+pub fn get_writer(format: &str) -> Result<OutputFormat, OutputFormatError> {
     match format.to_ascii_lowercase().as_str() {
         "yaml" => Ok(OutputFormat::Yaml),
         "registry" => Ok(OutputFormat::Registry),
+        #[cfg(feature = "http-proxy")]
         "http_proxy" | "http-proxy" | "httpproxy" => Ok(OutputFormat::HttpProxy),
-        _ => Err(format!("Unknown output format: {}", format)),
+        _ => Err(OutputFormatError::Unknown(format.to_string())),
     }
 }
 
@@ -80,6 +91,7 @@ mod tests {
         assert_eq!(get_writer("registry"), Ok(OutputFormat::Registry));
     }
 
+    #[cfg(feature = "http-proxy")]
     #[test]
     fn test_get_writer_http_proxy_variants() {
         assert_eq!(get_writer("http_proxy"), Ok(OutputFormat::HttpProxy));
@@ -91,6 +103,11 @@ mod tests {
     fn test_get_writer_case_insensitive() {
         assert_eq!(get_writer("YAML"), Ok(OutputFormat::Yaml));
         assert_eq!(get_writer("Registry"), Ok(OutputFormat::Registry));
+    }
+
+    #[cfg(feature = "http-proxy")]
+    #[test]
+    fn test_get_writer_case_insensitive_http_proxy() {
         assert_eq!(get_writer("HTTP_PROXY"), Ok(OutputFormat::HttpProxy));
     }
 
@@ -100,6 +117,7 @@ mod tests {
         assert!(get_writer("").is_err());
         assert!(get_writer("xml")
             .unwrap_err()
+            .to_string()
             .contains("Unknown output format"));
     }
 

@@ -8,15 +8,27 @@ use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use regex::Regex;
+use thiserror::Error;
 use tracing::{debug, warn};
 
 use apcore::context::Context;
 use apcore::errors::ModuleError;
-use apcore::module::{Module, ModuleAnnotations};
+use apcore::module::Module;
 use apcore::Registry;
 
 use crate::output::types::WriteResult;
 use crate::types::ScannedModule;
+
+/// Errors returned by [`HTTPProxyRegistryWriter::new`].
+#[derive(Debug, Error)]
+pub enum HTTPProxyWriterError {
+    /// `base_url` is not a valid URL or uses a non-http(s) scheme.
+    #[error("invalid base_url: {0}")]
+    InvalidBaseUrl(String),
+    /// `timeout_secs` is not a valid positive finite number.
+    #[error("invalid timeout_secs: {0}")]
+    InvalidTimeout(String),
+}
 
 /// Register scanned modules as HTTP proxy modules in the registry.
 ///
@@ -25,25 +37,67 @@ use crate::types::ScannedModule;
 pub struct HTTPProxyRegistryWriter {
     base_url: String,
     auth_header_factory: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
-    timeout_secs: f64,
+    client: reqwest::Client,
+}
+
+impl std::fmt::Debug for HTTPProxyRegistryWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HTTPProxyRegistryWriter")
+            .field("base_url", &self.base_url)
+            .field(
+                "auth_header_factory",
+                &self.auth_header_factory.as_ref().map(|_| "<factory>"),
+            )
+            .field("client", &self.client)
+            .finish()
+    }
 }
 
 impl HTTPProxyRegistryWriter {
     /// Create a new HTTP proxy writer.
     ///
-    /// - `base_url`: Base URL of the target API.
+    /// - `base_url`: Base URL of the target API (must be `http://` or `https://`).
     /// - `auth_header_factory`: Optional callable returning HTTP headers for auth.
-    /// - `timeout_secs`: HTTP request timeout in seconds.
+    /// - `timeout_secs`: HTTP request timeout in seconds (must be a positive finite number).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HTTPProxyWriterError::InvalidBaseUrl`] if `base_url` is not a valid URL
+    /// or its scheme is not `http` or `https` (SSRF prevention).
+    /// Returns [`HTTPProxyWriterError::InvalidTimeout`] if `timeout_secs` is not a
+    /// positive finite number.
     pub fn new(
         base_url: String,
         auth_header_factory: Option<Box<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
         timeout_secs: f64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, HTTPProxyWriterError> {
+        let parsed = reqwest::Url::parse(&base_url)
+            .map_err(|e| HTTPProxyWriterError::InvalidBaseUrl(format!("'{}': {e}", base_url)))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(HTTPProxyWriterError::InvalidBaseUrl(format!(
+                "scheme '{}' is not allowed — only http and https are permitted",
+                parsed.scheme()
+            )));
+        }
+
+        if !timeout_secs.is_finite() || timeout_secs <= 0.0 {
+            return Err(HTTPProxyWriterError::InvalidTimeout(format!(
+                "must be a positive finite number, got {timeout_secs}"
+            )));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs_f64(timeout_secs))
+            .build()
+            .map_err(|e| {
+                HTTPProxyWriterError::InvalidBaseUrl(format!("failed to build HTTP client: {e}"))
+            })?;
+
+        Ok(Self {
             base_url,
             auth_header_factory: auth_header_factory.map(Arc::from),
-            timeout_secs,
-        }
+            client,
+        })
     }
 
     /// Register each ScannedModule as an HTTP proxy module.
@@ -61,9 +115,8 @@ impl HTTPProxyRegistryWriter {
                 input_schema: module.input_schema.clone(),
                 output_schema: module.output_schema.clone(),
                 description: module.description.clone(),
-                annotations: module.annotations.clone().unwrap_or_default(),
-                timeout_secs: self.timeout_secs,
                 auth_header_factory: self.auth_header_factory.clone(),
+                client: self.client.clone(),
             };
 
             let descriptor = apcore::registry::registry::ModuleDescriptor {
@@ -75,7 +128,7 @@ impl HTTPProxyRegistryWriter {
                 output_schema: module.output_schema.clone(),
                 version: module.version.clone(),
                 tags: module.tags.clone(),
-                annotations: Some(proxy.annotations.clone()),
+                annotations: module.annotations.clone(),
                 examples: module.examples.clone(),
                 metadata: module.metadata.clone(),
                 display: module.display.clone(),
@@ -188,9 +241,9 @@ struct ProxyModule {
     input_schema: serde_json::Value,
     output_schema: serde_json::Value,
     description: String,
-    annotations: ModuleAnnotations,
-    timeout_secs: f64,
     auth_header_factory: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
+    // Shared HTTP client — cloned from HTTPProxyRegistryWriter to reuse connection pool.
+    client: reqwest::Client,
 }
 
 #[async_trait]
@@ -212,16 +265,6 @@ impl Module for ProxyModule {
         inputs: serde_json::Value,
         _ctx: &Context<serde_json::Value>,
     ) -> Result<serde_json::Value, ModuleError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .build()
-            .map_err(|e| {
-                ModuleError::new(
-                    apcore::errors::ErrorCode::ModuleExecuteError,
-                    format!("Failed to create HTTP client: {e}"),
-                )
-            })?;
-
         let mut actual_path = self.url_path.clone();
         let mut query: HashMap<String, String> = HashMap::new();
         let mut body: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -252,11 +295,11 @@ impl Module for ProxyModule {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), actual_path);
 
         let mut request = match self.http_method.as_str() {
-            "GET" => client.get(&url),
-            "POST" => client.post(&url),
-            "PUT" => client.put(&url),
-            "PATCH" => client.patch(&url),
-            "DELETE" => client.delete(&url),
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            "PUT" => self.client.put(&url),
+            "PATCH" => self.client.patch(&url),
+            "DELETE" => self.client.delete(&url),
             other => {
                 return Err(ModuleError::new(
                     apcore::errors::ErrorCode::ModuleExecuteError,
@@ -312,6 +355,41 @@ impl Module for ProxyModule {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_new_rejects_non_http_scheme() {
+        let result = HTTPProxyRegistryWriter::new("file:///etc/passwd".into(), None, 30.0);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("scheme 'file' is not allowed"));
+    }
+
+    #[test]
+    fn test_new_rejects_invalid_url() {
+        let result = HTTPProxyRegistryWriter::new("not a url".into(), None, 30.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_rejects_nan_timeout() {
+        let result = HTTPProxyRegistryWriter::new("http://localhost".into(), None, f64::NAN);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_new_rejects_negative_timeout() {
+        let result = HTTPProxyRegistryWriter::new("http://localhost".into(), None, -1.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_new_accepts_https_scheme() {
+        let result = HTTPProxyRegistryWriter::new("https://api.example.com".into(), None, 30.0);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn test_get_http_fields_defaults() {

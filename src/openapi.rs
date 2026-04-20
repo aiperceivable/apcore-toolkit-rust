@@ -4,12 +4,17 @@
 // input/output schemas from OpenAPI operation objects.
 
 use serde_json::{json, Value};
+use tracing::warn;
 
 /// Resolve a JSON `$ref` pointer like `#/components/schemas/Foo`.
 ///
 /// Returns the resolved schema, or an empty object on failure.
 pub fn resolve_ref(ref_string: &str, openapi_doc: &Value) -> Value {
     if !ref_string.starts_with("#/") {
+        warn!(
+            ref_string,
+            "resolve_ref: ignoring non-local $ref (must start with '#/')"
+        );
         return json!({});
     }
 
@@ -19,13 +24,23 @@ pub fn resolve_ref(ref_string: &str, openapi_doc: &Value) -> Value {
     for part in parts {
         match current.get(part) {
             Some(next) => current = next,
-            None => return json!({}),
+            None => {
+                warn!(
+                    ref_string,
+                    part, "resolve_ref: path segment not found in document"
+                );
+                return json!({});
+            }
         }
     }
 
     if current.is_object() {
         current.clone()
     } else {
+        warn!(
+            ref_string,
+            "resolve_ref: resolved value is not an object — returning empty schema"
+        );
         json!({})
     }
 }
@@ -44,7 +59,8 @@ pub fn resolve_schema(schema: &Value, openapi_doc: Option<&Value>) -> Value {
 /// Handles nested `$ref`, `allOf`, `anyOf`, `oneOf`, `items`, and `properties`.
 /// Depth-limited to 16 levels to prevent infinite recursion.
 pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> Value {
-    if depth > 16 {
+    if depth >= 16 {
+        warn!(depth, "deep_resolve_refs: depth limit reached — returning schema as-is to prevent infinite recursion");
         return schema.clone();
     }
 
@@ -713,5 +729,27 @@ mod tests {
         let result = extract_output_schema(&op, None);
         assert_eq!(result["type"], "object");
         assert!(result["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_deep_resolve_depth_limit_at_exactly_16() {
+        // Depth 15 should still resolve; depth 16 should be the cut-off.
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Leaf": {"type": "string"}
+                }
+            }
+        });
+        let schema = json!({"$ref": "#/components/schemas/Leaf"});
+        // At depth 15 the ref IS resolved (< 16)
+        let at_15 = deep_resolve_refs(&schema, &doc, 15);
+        assert_eq!(at_15["type"], "string", "depth 15 should resolve the $ref");
+        // At depth 16 the schema is returned unchanged (cut-off)
+        let at_16 = deep_resolve_refs(&schema, &doc, 16);
+        assert!(
+            at_16.get("$ref").is_some(),
+            "depth 16 must return schema unchanged"
+        );
     }
 }

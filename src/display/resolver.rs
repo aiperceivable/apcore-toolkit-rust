@@ -227,110 +227,46 @@ impl DisplayResolver {
         let empty_obj = json!({});
         let entry = binding_map.get(&module.module_id).unwrap_or(&empty_obj);
         let display_cfg = entry.get("display").unwrap_or(&empty_obj);
-        let binding_desc = entry.get("description").and_then(|v| v.as_str());
-        let binding_docs = entry.get("documentation").and_then(|v| v.as_str());
 
-        // Resolve suggested_alias from two sources in priority order:
-        //   1. module.suggested_alias (top-level field, preferred)
-        //   2. module.metadata["suggested_alias"] (legacy fallback)
-        // The top-level field takes precedence when set to a non-empty value.
-        let field_alias = module
-            .suggested_alias
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let metadata_alias = module
-            .metadata
-            .get("suggested_alias")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let suggested_alias = field_alias.or(metadata_alias);
+        let defaults = compute_display_defaults(&module, entry, display_cfg);
 
-        // -- Resolve cross-surface defaults --
-        let default_alias = str_or(display_cfg, "alias")
-            .or(suggested_alias.as_deref())
-            .unwrap_or(&module.module_id)
-            .to_string();
-
-        let default_description = str_or(display_cfg, "description")
-            .or(binding_desc)
-            .unwrap_or(&module.description)
-            .to_string();
-
-        let default_documentation = str_or(display_cfg, "documentation")
-            .or(binding_docs)
-            .or(module.documentation.as_deref())
-            .map(|s| s.to_string());
-
-        let default_guidance = str_or(display_cfg, "guidance").map(|s| s.to_string());
-
-        let resolved_tags = tags_or(display_cfg, "tags")
-            .or_else(|| tags_or(entry, "tags"))
-            .unwrap_or_else(|| module.tags.clone());
-
-        // -- Resolve per-surface fields --
         let (cli_surface, cli_alias_explicit) = self.resolve_surface(
             display_cfg,
             "cli",
-            &default_alias,
-            &default_description,
-            &default_guidance,
+            &defaults.alias,
+            &defaults.description,
+            &defaults.guidance,
         );
-        let (mcp_surface, _) = self.resolve_surface(
+        let (mut mcp_surface, _) = self.resolve_surface(
             display_cfg,
             "mcp",
-            &default_alias,
-            &default_description,
-            &default_guidance,
+            &defaults.alias,
+            &defaults.description,
+            &defaults.guidance,
         );
         let (a2a_surface, _) = self.resolve_surface(
             display_cfg,
             "a2a",
-            &default_alias,
-            &default_description,
-            &default_guidance,
+            &defaults.alias,
+            &defaults.description,
+            &defaults.guidance,
         );
 
-        // Auto-sanitize MCP alias
-        let mut mcp_surface = mcp_surface;
         let raw_mcp_alias = mcp_surface
             .get("alias")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-
-        let mut sanitized = MCP_ALIAS_SANITIZE_RE
-            .replace_all(&raw_mcp_alias, "_")
-            .to_string();
-        if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-            sanitized = format!("_{sanitized}");
-        }
-        mcp_surface["alias"] = json!(sanitized);
-
+        let sanitized = sanitize_mcp_alias(&raw_mcp_alias);
         if sanitized != raw_mcp_alias {
             debug!(
                 "Module '{}': MCP alias auto-sanitized '{}' → '{}'.",
-                module.module_id, raw_mcp_alias, sanitized,
+                module.module_id, raw_mcp_alias, sanitized
             );
         }
+        mcp_surface["alias"] = json!(sanitized);
 
-        let mut display = json!({
-            "alias": default_alias,
-            "description": default_description,
-            "guidance": default_guidance,
-            "tags": resolved_tags,
-            "cli": cli_surface,
-            "mcp": mcp_surface,
-            "a2a": a2a_surface,
-        });
-
-        if let Some(doc) = &default_documentation {
-            display["documentation"] = json!(doc);
-        } else {
-            display["documentation"] = Value::Null;
-        }
-
-        // -- Validate aliases --
+        let mut display = assemble_display(&defaults, cli_surface, mcp_surface, a2a_surface);
         self.validate_aliases(&mut display, &module.module_id, cli_alias_explicit)?;
 
         module.metadata.insert("display".into(), display);
@@ -423,6 +359,93 @@ pub enum DisplayResolverError {
     /// An alias validation constraint was violated.
     #[error("{0}")]
     Validation(String),
+}
+
+// -- Module-level helpers extracted from resolve_one --
+
+/// Resolved cross-surface display defaults before per-surface overrides.
+struct DisplayDefaults {
+    alias: String,
+    description: String,
+    documentation: Option<String>,
+    guidance: Option<String>,
+    tags: Vec<String>,
+}
+
+/// Compute cross-surface display defaults from binding and scanner data.
+fn compute_display_defaults(
+    module: &ScannedModule,
+    entry: &Value,
+    display_cfg: &Value,
+) -> DisplayDefaults {
+    let binding_desc = entry.get("description").and_then(|v| v.as_str());
+    let binding_docs = entry.get("documentation").and_then(|v| v.as_str());
+
+    // Top-level suggested_alias takes precedence over metadata["suggested_alias"].
+    let field_alias = module
+        .suggested_alias
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let metadata_alias = module
+        .metadata
+        .get("suggested_alias")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let suggested_alias = field_alias.or(metadata_alias);
+
+    let alias = str_or(display_cfg, "alias")
+        .or(suggested_alias.as_deref())
+        .unwrap_or(&module.module_id)
+        .to_string();
+    let description = str_or(display_cfg, "description")
+        .or(binding_desc)
+        .unwrap_or(&module.description)
+        .to_string();
+    let documentation = str_or(display_cfg, "documentation")
+        .or(binding_docs)
+        .or(module.documentation.as_deref())
+        .map(|s| s.to_string());
+    let guidance = str_or(display_cfg, "guidance").map(|s| s.to_string());
+    let tags = tags_or(display_cfg, "tags")
+        .or_else(|| tags_or(entry, "tags"))
+        .unwrap_or_else(|| module.tags.clone());
+
+    DisplayDefaults {
+        alias,
+        description,
+        documentation,
+        guidance,
+        tags,
+    }
+}
+
+/// Sanitize a raw MCP alias: replace disallowed characters with `_` and
+/// prefix a leading digit with `_` (OpenAI function-name rules).
+fn sanitize_mcp_alias(raw: &str) -> String {
+    let mut s = MCP_ALIAS_SANITIZE_RE.replace_all(raw, "_").to_string();
+    if s.starts_with(|c: char| c.is_ascii_digit()) {
+        s = format!("_{s}");
+    }
+    s
+}
+
+/// Assemble the final display JSON from resolved defaults and surface values.
+fn assemble_display(defaults: &DisplayDefaults, cli: Value, mcp: Value, a2a: Value) -> Value {
+    let mut display = json!({
+        "alias": defaults.alias,
+        "description": defaults.description,
+        "guidance": defaults.guidance,
+        "tags": defaults.tags,
+        "cli": cli,
+        "mcp": mcp,
+        "a2a": a2a,
+    });
+    display["documentation"] = match &defaults.documentation {
+        Some(doc) => json!(doc),
+        None => Value::Null,
+    };
+    display
 }
 
 // -- Utility helpers --

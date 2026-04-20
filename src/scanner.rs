@@ -114,16 +114,33 @@ pub fn filter_modules(
 ///
 /// A warning is appended to the module's warnings list when a rename occurs.
 pub fn deduplicate_ids(modules: Vec<ScannedModule>) -> Vec<ScannedModule> {
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Pre-scan to build the full set of original IDs, so that generated suffixed
+    // names skip any ID that already exists in the input (prevents forward collisions
+    // like `[a, a, a_2]` producing two `a_2` entries).
+    let original_ids: std::collections::HashSet<String> =
+        modules.iter().map(|m| m.module_id.clone()).collect();
+    let mut occurrence_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut result: Vec<ScannedModule> = Vec::with_capacity(modules.len());
 
     for mut module in modules {
         let mid = module.module_id.clone();
-        let count = seen.entry(mid.clone()).or_insert(0);
+        let count = occurrence_count.entry(mid.clone()).or_insert(0);
         *count += 1;
 
-        if *count > 1 {
-            let new_id = format!("{}_{}", mid, count);
+        if *count == 1 {
+            assigned.insert(mid.clone());
+        } else {
+            // Find the smallest suffix that doesn't collide with any original or
+            // already-assigned ID.
+            let mut suffix = *count;
+            let mut new_id = format!("{}_{}", mid, suffix);
+            while assigned.contains(&new_id) || original_ids.contains(&new_id) {
+                suffix += 1;
+                new_id = format!("{}_{}", mid, suffix);
+            }
+            assigned.insert(new_id.clone());
             module.warnings.push(format!(
                 "Module ID renamed from '{}' to '{}' to avoid collision",
                 mid, new_id
@@ -380,5 +397,22 @@ mod tests {
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
         assert!(!ann.cacheable);
+    }
+
+    #[test]
+    fn test_deduplicate_ids_no_collision_with_preexisting_suffixed_id() {
+        // [a, a, a_2] — the second 'a' must not collide with the pre-existing 'a_2'.
+        // Pre-scan sees {"a", "a_2"}, so the second 'a' skips 'a_2' and picks 'a_3'.
+        let modules = vec![make_module("a"), make_module("a"), make_module("a_2")];
+        let result = deduplicate_ids(modules);
+        assert_eq!(result[0].module_id, "a", "first 'a' keeps its ID");
+        assert_eq!(
+            result[1].module_id, "a_3",
+            "second 'a' skips 'a_2' (pre-existing) and picks 'a_3'"
+        );
+        assert_eq!(result[2].module_id, "a_2", "original 'a_2' keeps its ID");
+        // All IDs must be distinct.
+        let ids: std::collections::HashSet<_> = result.iter().map(|m| &m.module_id).collect();
+        assert_eq!(ids.len(), 3, "all three IDs must be distinct");
     }
 }

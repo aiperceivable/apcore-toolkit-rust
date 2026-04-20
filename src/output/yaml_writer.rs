@@ -103,19 +103,27 @@ impl YAMLWriter {
             // Atomic write: write to a temp file in the same directory then rename.
             // fs::rename on the same filesystem is atomic on POSIX; on Windows it
             // replaces any existing target atomically on NTFS.
+            // The tmp file is removed on any failure so no stale `.yaml.tmp` is left.
             let tmp_path = file_path.with_extension("yaml.tmp");
-            {
-                let mut tmp_file = fs::File::create(&tmp_path)
-                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
-                tmp_file
-                    .write_all(full_content.as_bytes())
-                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
-                tmp_file
-                    .flush()
-                    .map_err(|e| WriteError::new(tmp_path.display().to_string(), e.to_string()))?;
+            let write_res = (|| -> std::io::Result<()> {
+                let mut tmp_file = fs::File::create(&tmp_path)?;
+                tmp_file.write_all(full_content.as_bytes())?;
+                tmp_file.flush()
+            })();
+            if let Err(e) = write_res {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(WriteError::new(
+                    tmp_path.display().to_string(),
+                    e.to_string(),
+                ));
             }
-            fs::rename(&tmp_path, &file_path)
-                .map_err(|e| WriteError::new(file_path.display().to_string(), e.to_string()))?;
+            if let Err(e) = fs::rename(&tmp_path, &file_path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(WriteError::new(
+                    file_path.display().to_string(),
+                    e.to_string(),
+                ));
+            }
             debug!(file_path = %file_path.display(), "Written");
 
             let mut result =

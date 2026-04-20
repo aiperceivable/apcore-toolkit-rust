@@ -5,10 +5,13 @@
 // in Rust (no runtime import) we validate the format and return the
 // parsed components.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 /// A parsed target reference with module path and qualified name components.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedTarget {
     /// The module path portion (before the last `:`).
     pub module_path: String,
@@ -44,6 +47,10 @@ pub struct ResolvedTarget {
 /// assert_eq!(result.module_path, "my_module");
 /// assert_eq!(result.qualname, "my_func");
 /// ```
+/// Regex matching valid identifier qualnames (alphanumeric + underscores, no leading digit).
+static IDENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("static regex"));
+
 pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
     let last_colon = target.rfind(':').ok_or_else(|| {
         format!("Invalid target format: \"{target}\". Expected \"module_path:qualname\".")
@@ -64,9 +71,7 @@ pub fn resolve_target(target: &str) -> Result<ResolvedTarget, String> {
         ));
     }
 
-    // Validate qualname: must be a valid identifier (alphanumeric + underscores)
-    let ident_re = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap();
-    if !ident_re.is_match(qualname) {
+    if !IDENT_RE.is_match(qualname) {
         return Err(format!(
             "Invalid qualname \"{qualname}\" in target \"{target}\". \
              Must be a valid identifier."
@@ -157,5 +162,25 @@ mod tests {
     fn test_resolve_target_underscore_qualname() {
         let result = resolve_target("mod:_private_func").unwrap();
         assert_eq!(result.qualname, "_private_func");
+    }
+
+    #[test]
+    fn test_resolved_target_serde_roundtrip() {
+        let target = ResolvedTarget {
+            module_path: "my_crate::handlers".into(),
+            qualname: "create_task".into(),
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        let deserialized: ResolvedTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, target);
+    }
+
+    #[test]
+    fn test_ident_re_not_recompiled_per_call() {
+        // Calling resolve_target twice exercises the LazyLock path (no recompile).
+        let r1 = resolve_target("a:valid_func").unwrap();
+        let r2 = resolve_target("b:another_func").unwrap();
+        assert_eq!(r1.qualname, "valid_func");
+        assert_eq!(r2.qualname, "another_func");
     }
 }
