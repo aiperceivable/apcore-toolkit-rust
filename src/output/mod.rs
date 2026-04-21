@@ -64,7 +64,9 @@ pub enum OutputFormat {
 /// match fmt {
 ///     OutputFormat::Yaml => { /* use YAMLWriter */ }
 ///     OutputFormat::Registry => { /* use RegistryWriter */ }
-///     OutputFormat::HttpProxy => { /* use HTTPProxyRegistryWriter */ }
+///     // OutputFormat::HttpProxy (feature "http-proxy") => use HTTPProxyRegistryWriter
+///     #[allow(unreachable_patterns)]
+///     _ => { /* other variants (e.g. HttpProxy when the `http-proxy` feature is enabled) */ }
 /// }
 /// ```
 pub fn get_writer(format: &str) -> Result<OutputFormat, OutputFormatError> {

@@ -11,8 +11,16 @@ See examples:
 - `src/output/registry_writer.rs` — `RegistryWriter` registration tests
 - `src/display/resolver.rs` — `DisplayResolver` resolution tests
 
-This directory contains only test fixtures shared across modules:
-- `fixtures/scanner_verb_map.json` — HTTP verb map test data
+This directory contains black-box integration tests that exercise the
+public API from outside the crate (mirroring the per-module test files
+present in the Python and TypeScript SDKs), plus shared fixtures:
+
+- `public_api_integration.rs` — smoke-tests every crate-root re-export
+  (`VERSION`, `get_writer`, `resolve_http_verb`, path-param helpers, etc.).
+- `scanner_verb_map_conformance.rs` — runs every case in the shared
+  conformance fixture against `generate_suggested_alias`.
+- `fixtures/scanner_verb_map.json` — HTTP verb map test data (shared with
+  the Python and TypeScript SDKs).
 
 ## Running tests
 

@@ -5,7 +5,7 @@
 // All functions are pure and infallible.
 
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 /// Canonical HTTP method to semantic verb mapping.
@@ -36,6 +36,12 @@ static PATH_PARAM_RE: LazyLock<Regex> =
 /// Anchored variant for whole-segment match testing.
 static PATH_PARAM_FULL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\{[^}]+\}|:[a-zA-Z_]\w*)$").expect("valid regex"));
+
+/// Named-capture variant: extracts the parameter name without punctuation.
+/// Mirrors Python's `_PATH_PARAM_NAMED_RE`.
+static PATH_PARAM_NAMED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\{(?P<brace>[^}]+)\}|:(?P<colon>[a-zA-Z_]\w*)").expect("valid regex")
+});
 
 /// Check if a URL path contains path parameter placeholders.
 ///
@@ -123,6 +129,68 @@ pub fn resolve_http_verb(method: &str, path_has_params: bool) -> String {
 ///     "orgs.members.list"
 /// );
 /// ```
+/// Return the set of parameter names declared in a URL path.
+///
+/// Recognises both brace-style (`/users/{id}`) and colon-style
+/// (`/users/:id`) placeholders. Returned names have the surrounding
+/// punctuation stripped.
+///
+/// # Examples
+///
+/// ```
+/// use apcore_toolkit::http_verb_map::extract_path_param_names;
+/// use std::collections::HashSet;
+///
+/// let names = extract_path_param_names("/orgs/{org_id}/members/:m");
+/// assert!(names.contains("org_id"));
+/// assert!(names.contains("m"));
+/// ```
+pub fn extract_path_param_names(path: &str) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    for caps in PATH_PARAM_NAMED_RE.captures_iter(path) {
+        if let Some(m) = caps.name("brace").or_else(|| caps.name("colon")) {
+            names.insert(m.as_str().to_string());
+        }
+    }
+    names
+}
+
+/// Substitute `{name}` and `:name` placeholders with `values[name]`.
+///
+/// Keys in `values` that do not appear as placeholders are ignored. A
+/// placeholder whose name is absent from `values` is left unchanged
+/// (callers can detect the leftover via [`extract_path_param_names`]).
+///
+/// # Examples
+///
+/// ```
+/// use apcore_toolkit::http_verb_map::substitute_path_params;
+/// use std::collections::HashMap;
+///
+/// let mut values: HashMap<&str, String> = HashMap::new();
+/// values.insert("id", "42".to_string());
+/// assert_eq!(substitute_path_params("/users/{id}", &values), "/users/42");
+/// ```
+pub fn substitute_path_params<V: AsRef<str>>(path: &str, values: &HashMap<&str, V>) -> String {
+    let mut result = String::with_capacity(path.len());
+    let mut last = 0usize;
+    for caps in PATH_PARAM_NAMED_RE.captures_iter(path) {
+        let whole = caps.get(0).expect("full match present");
+        result.push_str(&path[last..whole.start()]);
+        let name = caps
+            .name("brace")
+            .or_else(|| caps.name("colon"))
+            .map(|m| m.as_str());
+        match name.and_then(|n| values.get(n)) {
+            Some(v) => result.push_str(v.as_ref()),
+            None => result.push_str(whole.as_str()),
+        }
+        last = whole.end();
+    }
+    result.push_str(&path[last..]);
+    result
+}
+
 pub fn generate_suggested_alias(path: &str, method: &str) -> String {
     let trimmed = path.trim_matches('/');
     let raw_segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
@@ -349,6 +417,93 @@ mod tests {
     #[test]
     fn test_generate_alias_param_only_path() {
         assert_eq!(generate_suggested_alias("/{id}", "GET"), "get");
+    }
+
+    // ---- extract_path_param_names ----
+
+    #[test]
+    fn test_extract_names_static_path_empty() {
+        assert!(extract_path_param_names("/tasks").is_empty());
+    }
+
+    #[test]
+    fn test_extract_names_brace_single() {
+        let names = extract_path_param_names("/users/{id}");
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("id"));
+    }
+
+    #[test]
+    fn test_extract_names_colon_single() {
+        let names = extract_path_param_names("/users/:id");
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("id"));
+    }
+
+    #[test]
+    fn test_extract_names_mixed_multiple() {
+        let names = extract_path_param_names("/orgs/{org_id}/members/:member_id");
+        assert_eq!(names.len(), 2);
+        assert!(names.contains("org_id"));
+        assert!(names.contains("member_id"));
+    }
+
+    #[test]
+    fn test_extract_names_deduplicates() {
+        let names = extract_path_param_names("/a/{id}/b/{id}");
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("id"));
+    }
+
+    // ---- substitute_path_params ----
+
+    #[test]
+    fn test_substitute_brace_value() {
+        let mut values: HashMap<&str, String> = HashMap::new();
+        values.insert("id", "42".to_string());
+        assert_eq!(substitute_path_params("/users/{id}", &values), "/users/42");
+    }
+
+    #[test]
+    fn test_substitute_colon_value() {
+        let mut values: HashMap<&str, String> = HashMap::new();
+        values.insert("id", "abc".to_string());
+        assert_eq!(substitute_path_params("/users/:id", &values), "/users/abc");
+    }
+
+    #[test]
+    fn test_substitute_leaves_unknown_placeholder() {
+        let mut values: HashMap<&str, String> = HashMap::new();
+        values.insert("id", "1".to_string());
+        assert_eq!(
+            substitute_path_params("/users/{id}/{role}", &values),
+            "/users/1/{role}"
+        );
+    }
+
+    #[test]
+    fn test_substitute_ignores_extra_keys() {
+        let mut values: HashMap<&str, String> = HashMap::new();
+        values.insert("id", "1".to_string());
+        values.insert("extra", "x".to_string());
+        assert_eq!(substitute_path_params("/users/{id}", &values), "/users/1");
+    }
+
+    #[test]
+    fn test_substitute_no_placeholders() {
+        let values: HashMap<&str, String> = HashMap::new();
+        assert_eq!(substitute_path_params("/tasks", &values), "/tasks");
+    }
+
+    #[test]
+    fn test_substitute_multiple_mixed_styles() {
+        let mut values: HashMap<&str, String> = HashMap::new();
+        values.insert("org_id", "7".to_string());
+        values.insert("m", "me".to_string());
+        assert_eq!(
+            substitute_path_params("/orgs/{org_id}/members/:m", &values),
+            "/orgs/7/members/me"
+        );
     }
 
     // ---- SCANNER_VERB_MAP ----

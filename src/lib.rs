@@ -1,6 +1,21 @@
 //! apcore-toolkit — Shared scanner, schema extraction, and output toolkit.
 //!
-//! Rust implementation — tri-language parity with Python and TypeScript (v0.5.0).
+//! Rust implementation — tri-language parity with Python and TypeScript.
+//!
+//! The crate version is exported as [`VERSION`] to match the `__version__`
+//! / `VERSION` symbols in the Python and TypeScript SDKs.
+//!
+//! # Language-writer parity note
+//!
+//! Python ships [`PythonWriter`] and TypeScript ships [`TypeScriptWriter`]
+//! for generating language-specific binding code. The Rust SDK intentionally
+//! does **not** ship a `RustWriter`: Rust consumers import `apcore-toolkit`
+//! directly and work with the strongly-typed `ScannedModule` / registry APIs
+//! instead of generating source files. This parity gap is intentional and
+//! will not be filled in future releases.
+//!
+//! [`PythonWriter`]: https://github.com/aiperceivable/apcore-toolkit-python
+//! [`TypeScriptWriter`]: https://github.com/aiperceivable/apcore-toolkit-typescript
 //!
 //! # Crate-root re-exports
 //!
@@ -19,6 +34,13 @@
 //!     "tasks.user_data.create"
 //! );
 //! ```
+
+/// Crate version, read from `Cargo.toml` at compile time.
+///
+/// Mirrors Python's `apcore_toolkit.__version__` and TypeScript's
+/// `VERSION` export so all three SDKs expose the current toolkit version
+/// via a public symbol.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod ai_enhancer;
 pub mod binding_loader;
@@ -39,7 +61,8 @@ pub use binding_loader::{BindingLoadError, BindingLoader};
 pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::{to_markdown, MarkdownError, MarkdownOptions};
 pub use http_verb_map::{
-    generate_suggested_alias, has_path_params, resolve_http_verb, SCANNER_VERB_MAP,
+    extract_path_param_names, generate_suggested_alias, has_path_params, resolve_http_verb,
+    substitute_path_params, SCANNER_VERB_MAP,
 };
 pub use openapi::{
     deep_resolve_refs, extract_input_schema, extract_output_schema, resolve_ref, resolve_schema,
