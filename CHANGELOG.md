@@ -2,36 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.0-rc.1] - 2026-04-19
+## [0.5.0] - 2026-04-21
 
-Pre-release tag. The `TODO(release-gate)` comments in `binding_loader.rs` and `registry_writer.rs` flag the cross-SDK parity audit for `BindingLoader` and `RegistryWriter` as inconclusive at time of tagging. Version will be bumped to a final `0.5.0` once those TODOs are resolved.
-
-### Changed (breaking)
-
-- **`scanner` module no longer re-exports `http_verb_map` helpers.** Previously `apcore_toolkit::scanner::resolve_http_verb`, `::SCANNER_VERB_MAP`, `::has_path_params`, and `::generate_suggested_alias` were reachable via a `pub use crate::http_verb_map::{...}` inside `src/scanner.rs`. Those re-exports were removed to eliminate the double path. Downstream adapter crates must import from the crate root (`apcore_toolkit::{resolve_http_verb, SCANNER_VERB_MAP, has_path_params, generate_suggested_alias}`) or from `apcore_toolkit::http_verb_map::{...}`. The crate-root re-exports are guarded by a doc test in `src/lib.rs`.
-
-### Hardening
-
-- **`BindingLoader::parse_entry`** — wrong-type required fields (e.g. `module_id: 42`, `target: true`, empty-string `module_id`) are now surfaced as `BindingLoadError::MissingFields` instead of silently coerced to `""`. In strict mode, non-object `input_schema`/`output_schema` are likewise rejected. The error display updated from "missing or null" to "missing or invalid required fields".
-- **`BindingLoader::load`** (recursive branch) — per-entry `WalkDir` traversal failures (permission denied, broken symlinks, I/O errors) are now surfaced as `BindingLoadError::FileRead`, matching the non-recursive branch. Previously `filter_map(|e| e.ok())` silently dropped them, producing partial result sets.
-- **`output::registry_writer::RegistryWriter::to_function_module`** — passthrough-handler warning migrated from `eprintln!` to `tracing::warn!(module_id = %…, …)`, honouring the crate's `tracing`-only logging rule.
-
-### Tests
-
-- +5 new regression tests (`test_wrong_type_module_id_integer_rejected`, `test_wrong_type_target_bool_rejected`, `test_empty_string_module_id_rejected`, `test_strict_wrong_type_input_schema_rejected`, `test_recursive_load_surfaces_walkdir_errors`). Removed 4 misleading `test_reexport_*` tests from `scanner::tests` that duplicated `http_verb_map::tests` coverage. Added one crate-root re-export doc test in `src/lib.rs`. Total suite: 306 unit tests + 6 doctests.
-
-## [0.5.0] - 2026-04-19
+Aligned release across Python, TypeScript, and Rust. Tracks apcore 0.19.0 features (expanded `ModuleAnnotations`, `display` field). The prior `0.5.0-rc.1` pre-release tag has been folded into this entry; the final `0.5.0` ships with the full cross-SDK parity audit completed.
 
 ### Added
 
 - **`BindingLoader`** / **`BindingLoadError`** (`apcore_toolkit::binding_loader`) — parses `.binding.yaml` files back into `ScannedModule` objects, the inverse of `YAMLWriter`. Pure-data reader: no target import, no Registry mutation. Matches the Python and TypeScript implementations in API shape and behaviour.
-  - `load(path, strict) -> Result<Vec<ScannedModule>, BindingLoadError>` — single file or directory of `*.binding.yaml`.
+  - `load(path, strict, recursive) -> Result<Vec<ScannedModule>, BindingLoadError>` — single file or directory of `*.binding.yaml`; `recursive=true` descends into subdirectories via `walkdir`.
   - `load_data(data, strict)` — pre-parsed `serde_json::Value`.
   - Loose mode (`strict=false`, default): only `module_id + target` required.
   - Strict mode (`strict=true`): additionally requires `input_schema + output_schema`.
   - `spec_version` validated via `tracing::warn`; missing or unsupported values log but do not fail.
   - `annotations` parsed via `serde_json::from_value::<ModuleAnnotations>`; malformed values degrade to `None` with a warning.
-  - `BindingLoadError` enum (`thiserror`-derived) with variants: `PathNotFound`, `FileRead`, `YamlParse`, `MissingFields`, `InvalidStructure`.
+  - `BindingLoadError` enum (`thiserror`-derived) with 7 variants: `PathNotFound`, `FileRead`, `YamlParse`, `MissingFields`, `InvalidStructure`, `FileTooLarge`, `TooManyFiles`.
+  - **Safety caps**: `FileTooLarge` (16 MiB per-file limit) and `TooManyFiles` (10,000 files-per-directory limit) bound worst-case memory and traversal cost on untrusted input. The Python and TypeScript loaders do not currently enforce these caps — callers there should pre-validate directories loaded from untrusted sources.
   - Re-exported from crate root: `apcore_toolkit::{BindingLoader, BindingLoadError}`.
 - **`ScannedModule.display`** — new optional field (`Option<serde_json::Value>`) for the sparse display overlay. `#[serde(skip_serializing_if = "Option::is_none")]` keeps the wire format clean. Constructor `ScannedModule::new()` initializes to `None`.
 
@@ -42,19 +27,26 @@ Pre-release tag. The `TODO(release-gate)` comments in `binding_loader.rs` and `r
 - **`test_field_count`** updated from 13 → 14 to reflect the new field.
 - **`output::registry_writer` & `output::http_proxy_writer`** — `ModuleDescriptor` construction updated for apcore 0.19.0 breaking changes: `display: Option<serde_json::Value>` now required; `annotations` is now `Option<ModuleAnnotations>`; `http_proxy_writer` now populates all descriptor fields (previously partial, missed `description`/`documentation`/`version`/`examples`/`metadata`).
 
+### Changed (breaking)
+
+- **`scanner` module no longer re-exports `http_verb_map` helpers.** Previously `apcore_toolkit::scanner::resolve_http_verb`, `::SCANNER_VERB_MAP`, `::has_path_params`, and `::generate_suggested_alias` were reachable via a `pub use crate::http_verb_map::{...}` inside `src/scanner.rs`. Those re-exports were removed to eliminate the double path. Downstream adapter crates must import from the crate root (`apcore_toolkit::{resolve_http_verb, SCANNER_VERB_MAP, has_path_params, generate_suggested_alias}`) or from `apcore_toolkit::http_verb_map::{...}`. The crate-root re-exports are guarded by a doc test in `src/lib.rs`.
+
 ### Dependencies
 
 - **`apcore >= 0.19.0`** — picks up the 12-field `ModuleAnnotations`, `FunctionModule.display`, and the expanded `ModuleDescriptor`. Serde handles new annotation fields automatically.
 
 ### Tests
 
-- +26 new tests: 18 for `BindingLoader` (parsing, strict/loose modes, spec_version, filesystem loading, round-trip with `YAMLWriter`); 3 for `ScannedModule.display` (default, skip-if-none, serde round-trip); 2 for YAML writer display emission; 3 hardening tests (malformed display warn, null display drop, error message readability). Total suite: 304 tests.
+- +27 net new tests (+31 added, −4 removed): 18 for `BindingLoader` parsing + strict/loose modes + spec_version + filesystem loading + round-trip with `YAMLWriter`; 3 for `ScannedModule.display` (default, skip-if-none, serde round-trip); 2 for YAML writer display emission; 3 hardening tests (malformed display warn, null display drop, error message readability); 5 cross-SDK regression tests for strict-mode wrong-type / empty-string rejection and recursive `WalkDir` error surfacing. Removed 4 misleading `test_reexport_*` tests from `scanner::tests` that duplicated `http_verb_map::tests` coverage; added one crate-root re-export doc test in `src/lib.rs`. Total suite: 306 unit tests + 6 doctests.
 
 ### Hardening (post-review)
 
-- **`BindingLoader::load`**: directory iteration now surfaces per-entry I/O failures via `BindingLoadError::FileRead` instead of silently discarding them via `filter_map(Result::ok)`.
+- **`BindingLoader::load`**: directory iteration now surfaces per-entry I/O failures via `BindingLoadError::FileRead` instead of silently discarding them via `filter_map(Result::ok)`. The recursive `WalkDir` branch applies the same policy — permission denied, broken symlinks, and I/O errors are reported as `FileRead` rather than producing a partial result set.
 - **`BindingLoadError` `Display`**: `MissingFields` and `InvalidStructure` messages no longer leak `Some("…")` / `None` debug wrappers — they render the inner path/module_id directly with readable fallbacks.
 - **Malformed `display` in a binding entry** now emits a `tracing::warn` rather than being silently dropped.
+- **`BindingLoader::parse_entry`** — wrong-type required fields (e.g. `module_id: 42`, `target: true`, empty-string `module_id`) are now surfaced as `BindingLoadError::MissingFields` instead of silently coerced to `""`. In strict mode, non-object `input_schema`/`output_schema` are likewise rejected. The error display widens from `"missing or null"` to `"missing or invalid required fields"`. This behaviour is the cross-SDK reference — the Python and TypeScript loaders were updated to match in 0.5.0.
+- **`BindingLoader` safety caps** — `FileTooLarge` (16 MiB) and `TooManyFiles` (10,000) `BindingLoadError` variants added to bound memory and traversal cost on untrusted input.
+- **`output::registry_writer::RegistryWriter::to_function_module`** — passthrough-handler warning migrated from `eprintln!` to `tracing::warn!(module_id = %…, …)`, honouring the crate's `tracing`-only logging rule.
 
 ## [0.4.0] - 2026-03-25
 

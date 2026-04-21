@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.5.0-rc.1"
+version = "0.5.0"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"

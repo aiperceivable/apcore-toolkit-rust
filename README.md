@@ -23,7 +23,7 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | Module | Description |
 |--------|-------------|
 | `ScannedModule` | Canonical struct representing a scanned endpoint |
-| `Scanner` | Async trait for framework scanners, generic over `App` type (e.g., `Scanner<axum::Router>`) |
+| `BaseScanner<App>` | Async trait for framework scanners, generic over the `App` type with default `()` (e.g., `BaseScanner<axum::Router>`) |
 | `filter_modules` | Regex-based include/exclude filtering for scanned modules |
 | `deduplicate_ids` | Resolves duplicate module IDs by appending `_2`, `_3`, etc. |
 | `infer_annotations_from_method` | Maps HTTP methods to behavioral `ModuleAnnotations` |
@@ -56,13 +56,13 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 
 ```rust
 use async_trait::async_trait;
-use apcore_toolkit::{Scanner, ScannedModule, YAMLWriter, filter_modules, deduplicate_ids};
+use apcore_toolkit::{BaseScanner, ScannedModule, YAMLWriter, filter_modules, deduplicate_ids};
 use serde_json::json;
 
 struct MyScanner;
 
 #[async_trait]
-impl Scanner<()> for MyScanner {
+impl BaseScanner<()> for MyScanner {
     async fn scan(&self, _app: &()) -> Vec<ScannedModule> {
         vec![
             ScannedModule::new(
@@ -99,13 +99,13 @@ async fn main() {
 ### Framework-Specific Scanner (Axum Example)
 
 ```rust,ignore
-use apcore_toolkit::{Scanner, ScannedModule};
+use apcore_toolkit::{BaseScanner, ScannedModule};
 use async_trait::async_trait;
 
 struct AxumScanner;
 
 #[async_trait]
-impl Scanner<axum::Router> for AxumScanner {
+impl BaseScanner<axum::Router> for AxumScanner {
     async fn scan(&self, app: &axum::Router) -> Vec<ScannedModule> {
         // Extract routes from Axum router and convert to ScannedModule instances
         todo!("Implement route extraction")
