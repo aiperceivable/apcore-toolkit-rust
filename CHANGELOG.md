@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Surface-aware formatters** (refs aiperceivable/apcore-toolkit#13) — `format_module`, `format_schema`, `format_modules` for rendering `ScannedModule` and JSON Schema for specific consumer surfaces. Four `ModuleStyle` variants: `Markdown` (LLM context), `Skill` (drop-in `.claude/skills/<id>/SKILL.md` or `.gemini/skills/<id>/SKILL.md` body with minimal `name` + `description` frontmatter — no vendor-specific extensions), `TableRow` (CLI listing), `Json` (programmatic). Three `SchemaStyle` variants: `Prose`, `Table`, `Json`. `format_modules` adds optional `Option<GroupBy>` (`Tag` or `Prefix`). `display: bool` (default true upstream) prefers the `ScannedModule.display` overlay over raw fields. Returns are wrapped in a `FormatOutput` enum with `Text(String) | Value(serde_json::Value) | Values(Vec<Value>)` and `as_str` / `as_value` / `as_values` accessors. Lives in `formatting::surface`; re-exported at the crate root.
+
+### Changed
+
+- **`infer_annotations_from_method` HEAD/OPTIONS canonical mapping** (refs aiperceivable/apcore-toolkit#11) — already produced `readonly=true` for `HEAD` and `OPTIONS` (without `cacheable=true`), aligned with the canonical mapping declared in `apcore-toolkit/docs/features/scanning.md` and now also matched by Python and TypeScript. No code change needed in this SDK; an extra smoke test in `formatting::surface::tests::scanner_head_options_canonical_mapping` cross-references the new spec section.
+
 ## [0.5.0] - 2026-04-21
 
 Aligned release across Python, TypeScript, and Rust. Tracks apcore 0.19.0 features (expanded `ModuleAnnotations`, `display` field). The prior `0.5.0-rc.1` pre-release tag has been folded into this entry; the final `0.5.0` ships with the full cross-SDK parity audit completed.

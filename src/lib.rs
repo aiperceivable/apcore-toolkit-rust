@@ -59,7 +59,10 @@ pub mod types;
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
 pub use binding_loader::{BindingLoadError, BindingLoader};
 pub use display::{DisplayResolver, DisplayResolverError};
-pub use formatting::{to_markdown, MarkdownError, MarkdownOptions};
+pub use formatting::{
+    format_module, format_modules, format_schema, to_markdown, FormatError, FormatOutput, GroupBy,
+    MarkdownError, MarkdownOptions, ModuleStyle, SchemaStyle,
+};
 pub use http_verb_map::{
     extract_path_param_names, generate_suggested_alias, has_path_params, resolve_http_verb,
     substitute_path_params, SCANNER_VERB_MAP,
