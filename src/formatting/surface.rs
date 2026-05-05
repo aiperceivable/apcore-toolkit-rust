@@ -6,12 +6,32 @@
 // `apcore-toolkit/docs/features/formatting.md`.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use apcore::module::ModuleAnnotations;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::serializers::{annotations_to_dict, module_to_dict};
 use crate::types::ScannedModule;
+
+/// Snake-case Map of every default-valued annotation field.
+///
+/// Used by the behavior-table renderer to skip fields that match the
+/// protocol default, keeping the table focused on what is actually
+/// non-default about the module. Lazily initialised on first access; the
+/// `ModuleAnnotations::default()` value never changes within a process so
+/// caching it is safe.
+fn default_annotations_dict() -> &'static Map<String, Value> {
+    static CACHE: OnceLock<Map<String, Value>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let default_ann = ModuleAnnotations::default();
+        match annotations_to_dict(Some(&default_ann)) {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        }
+    })
+}
 
 /// Schema render style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,36 +434,49 @@ fn render_module_markdown_body(module: &ScannedModule, resolved: &ResolvedDispla
     body
 }
 
-fn render_annotations_table(
-    annotations: Option<&apcore::module::ModuleAnnotations>,
-) -> Option<String> {
+/// Render `ModuleAnnotations` as a Markdown fact table.
+///
+/// Cross-SDK alignment rules (see
+/// `apcore-toolkit/docs/features/formatting.md` § Annotations Rendering):
+///
+/// 1. Emit only fields whose value differs from `ModuleAnnotations::default()`.
+/// 2. The `extra` free-form bag is always skipped.
+/// 3. Rows are sorted alphabetically by snake_case key (`serde_json::Map`
+///    iteration order under default features is already alphabetical via
+///    the underlying `BTreeMap`, so this is a property the data structure
+///    already gives us).
+/// 4. Bool values render as lowercase `true` / `false`; numbers, arrays,
+///    and objects use `serde_json::Value::Display` (which is JSON form);
+///    string values use their raw content.
+///
+/// Returns `None` when the resulting table would be empty (every annotation
+/// field equals its default), causing the caller to omit the `## Behavior`
+/// section entirely.
+fn render_annotations_table(annotations: Option<&ModuleAnnotations>) -> Option<String> {
     let value = annotations_to_dict(annotations);
     let obj = value.as_object()?;
-    let mut entries: Vec<(String, &Value)> = Vec::new();
+    let defaults = default_annotations_dict();
+    let mut entries: Vec<(&String, &Value)> = Vec::new();
     for (key, value) in obj.iter() {
         if key == "extra" {
             continue;
         }
-        let skip = match value {
-            Value::Null => true,
-            Value::Bool(false) => true,
-            Value::String(s) if s.is_empty() => true,
-            Value::Array(a) if a.is_empty() => true,
-            Value::Object(o) if o.is_empty() => true,
-            _ => false,
-        };
-        if skip {
+        if defaults.get(key) == Some(value) {
             continue;
         }
-        entries.push((key.clone(), value));
+        entries.push((key, value));
     }
     if entries.is_empty() {
         return None;
     }
+    // serde_json::Map iterates in alphabetical key order under default
+    // features, so `entries` is already sorted. We do not re-sort.
     let mut rows = vec!["| Flag | Value |".to_string(), "|---|---|".to_string()];
     for (key, value) in entries {
         let rendered = match value {
             Value::String(s) => s.clone(),
+            Value::Bool(true) => "true".to_string(),
+            Value::Bool(false) => "false".to_string(),
             other => other.to_string(),
         };
         rows.push(format!("| `{key}` | {rendered} |"));
@@ -669,7 +702,50 @@ mod tests {
         assert!(s.contains("| Flag | Value |"));
         assert!(s.contains("`readonly`"));
         assert!(s.contains("`cacheable`"));
+        // destructive matches the default; must not appear.
         assert!(!s.contains("`destructive`"));
+    }
+
+    #[test]
+    fn module_markdown_annotations_lowercase_bool() {
+        let out = format_module(&fixture_module(), ModuleStyle::Markdown, true);
+        let s = out.as_str().unwrap();
+        assert!(s.contains("| `readonly` | true |"));
+        assert!(s.contains("| `cacheable` | true |"));
+    }
+
+    #[test]
+    fn module_markdown_annotations_alphabetical() {
+        let out = format_module(&fixture_module(), ModuleStyle::Markdown, true);
+        let s = out.as_str().unwrap();
+        let readonly_idx = s.find("`readonly`").unwrap();
+        let cacheable_idx = s.find("`cacheable`").unwrap();
+        // 'cacheable' < 'readonly' alphabetically
+        assert!(cacheable_idx < readonly_idx);
+    }
+
+    #[test]
+    fn module_markdown_skips_default_values() {
+        let out = format_module(&fixture_module(), ModuleStyle::Markdown, true);
+        let s = out.as_str().unwrap();
+        // pagination_style defaults to "cursor"; must not appear.
+        assert!(!s.contains("`pagination_style`"));
+    }
+
+    #[test]
+    fn module_markdown_omits_behavior_when_all_defaults() {
+        let mut m = fixture_module();
+        m.annotations = Some(ModuleAnnotations::default());
+        let out = format_module(&m, ModuleStyle::Markdown, true);
+        assert!(!out.as_str().unwrap().contains("## Behavior"));
+    }
+
+    #[test]
+    fn module_markdown_omits_behavior_when_annotations_none() {
+        let mut m = fixture_module();
+        m.annotations = None;
+        let out = format_module(&m, ModuleStyle::Markdown, true);
+        assert!(!out.as_str().unwrap().contains("## Behavior"));
     }
 
     #[test]

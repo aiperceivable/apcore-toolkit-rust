@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Annotation-table cross-SDK alignment** — `format_module(.., ModuleStyle::Markdown | ModuleStyle::Skill, ..)` `## Behavior` table now emits only fields that differ from `ModuleAnnotations::default()`, sorts rows alphabetically by snake_case key (already the natural `serde_json::Map` iteration order under default features), and renders bool values as lowercase `true`/`false`. The section is omitted entirely when every annotation field matches its default. Closes the byte-equality gap with the Python and TypeScript SDKs.
 - **Surface-aware formatters** (refs aiperceivable/apcore-toolkit#13) — `format_module`, `format_schema`, `format_modules` for rendering `ScannedModule` and JSON Schema for specific consumer surfaces. Four `ModuleStyle` variants: `Markdown` (LLM context), `Skill` (drop-in `.claude/skills/<id>/SKILL.md` or `.gemini/skills/<id>/SKILL.md` body with minimal `name` + `description` frontmatter — no vendor-specific extensions), `TableRow` (CLI listing), `Json` (programmatic). Three `SchemaStyle` variants: `Prose`, `Table`, `Json`. `format_modules` adds optional `Option<GroupBy>` (`Tag` or `Prefix`). `display: bool` (default true upstream) prefers the `ScannedModule.display` overlay over raw fields. Returns are wrapped in a `FormatOutput` enum with `Text(String) | Value(serde_json::Value) | Values(Vec<Value>)` and `as_str` / `as_value` / `as_values` accessors. Lives in `formatting::surface`; re-exported at the crate root.
 
 ### Changed
