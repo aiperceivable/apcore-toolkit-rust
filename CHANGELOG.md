@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **`apcore` dependency bumped from `0.19` to `0.20`** — `Cargo.toml` `[dependencies]` now reads `apcore = "0.20"`; `Cargo.lock` regenerated to apcore 0.20.0. Previously the caret default `apcore = "0.19"` resolved to `>=0.19.0, <0.20.0`, hard-pinning below 0.20. Toolkit only `use`s stable crate surface (`apcore::Registry`, `apcore::context::Context`, `apcore::errors::ModuleError`, `apcore::module::{Module, ModuleAnnotations, ModuleExample}`); none of these were affected by 0.20.0 changes (which centred on `OverridesStore`, `RetryConfig::compute_delay_ms`, `TraceContext::inject_checked`, `TRACE_FLAGS_KEY`, and `ErrorCode::ConfigurationError`). Full lib test suite (380 passed) green against apcore 0.20.0.
+
 ### Added
 
 - **Annotation-table cross-SDK alignment** — `format_module(.., ModuleStyle::Markdown | ModuleStyle::Skill, ..)` `## Behavior` table now emits only fields that differ from `ModuleAnnotations::default()`, sorts rows alphabetically by snake_case key (already the natural `serde_json::Map` iteration order under default features), and renders bool values as lowercase `true`/`false`. The section is omitted entirely when every annotation field matches its default. Closes the byte-equality gap with the Python and TypeScript SDKs.
