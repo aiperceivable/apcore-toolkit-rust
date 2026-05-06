@@ -916,16 +916,16 @@ mod tests {
         assert!(out.as_str().unwrap().contains("## (untagged)"));
     }
 
-    // ---------- HEAD/OPTIONS canonical mapping (already correct, smoke test) ----------
+    // ---------- HEAD/OPTIONS canonical mapping (D10-001: all-false defaults) ----------
 
     #[test]
     fn scanner_head_options_canonical_mapping() {
         use crate::scanner::infer_annotations_from_method;
         let head = infer_annotations_from_method("HEAD");
         let options = infer_annotations_from_method("OPTIONS");
-        assert!(head.readonly);
+        assert!(!head.readonly);
         assert!(!head.cacheable);
-        assert!(options.readonly);
+        assert!(!options.readonly);
         assert!(!options.cacheable);
     }
 }
