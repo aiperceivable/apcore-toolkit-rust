@@ -190,8 +190,6 @@ let md = to_markdown(&data, &opts).unwrap();
 
 ## Requirements
 
-- Rust edition 2021
-- apcore >= 0.19.0
 - See `Cargo.toml` for full dependency list
 
 ## Features
