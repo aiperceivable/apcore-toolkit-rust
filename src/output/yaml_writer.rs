@@ -624,12 +624,24 @@ mod tests {
         );
 
         let results = writer
-            .write(&[mod1, mod2], dir.path().to_str().unwrap(), false, false, None)
+            .write(
+                &[mod1, mod2],
+                dir.path().to_str().unwrap(),
+                false,
+                false,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 2, "should produce two results");
 
-        let path1 = results[0].path.as_ref().expect("first result must have path");
-        let path2 = results[1].path.as_ref().expect("second result must have path");
+        let path1 = results[0]
+            .path
+            .as_ref()
+            .expect("first result must have path");
+        let path2 = results[1]
+            .path
+            .as_ref()
+            .expect("second result must have path");
         assert_ne!(path1, path2, "collision must produce distinct file paths");
         assert!(Path::new(path1).exists(), "first file must exist: {path1}");
         assert!(Path::new(path2).exists(), "second file must exist: {path2}");

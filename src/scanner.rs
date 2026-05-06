@@ -409,7 +409,10 @@ mod tests {
         // Regression test (D10-001): HEAD must return all-false defaults,
         // matching Python and TypeScript behavior. Previously returned readonly=true.
         let ann = infer_annotations_from_method("HEAD");
-        assert!(!ann.readonly, "HEAD should NOT be readonly (matches Python/TS)");
+        assert!(
+            !ann.readonly,
+            "HEAD should NOT be readonly (matches Python/TS)"
+        );
         assert!(!ann.cacheable);
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
@@ -420,7 +423,10 @@ mod tests {
         // Regression test (D10-001): OPTIONS must return all-false defaults,
         // matching Python and TypeScript behavior. Previously returned readonly=true.
         let ann = infer_annotations_from_method("OPTIONS");
-        assert!(!ann.readonly, "OPTIONS should NOT be readonly (matches Python/TS)");
+        assert!(
+            !ann.readonly,
+            "OPTIONS should NOT be readonly (matches Python/TS)"
+        );
         assert!(!ann.cacheable);
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
@@ -429,7 +435,10 @@ mod tests {
     #[test]
     fn test_infer_annotations_head_case_insensitive() {
         let ann = infer_annotations_from_method("head");
-        assert!(!ann.readonly, "HEAD (lowercase) should also return all-false defaults");
+        assert!(
+            !ann.readonly,
+            "HEAD (lowercase) should also return all-false defaults"
+        );
     }
 
     #[test]

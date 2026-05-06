@@ -1054,7 +1054,10 @@ mod tests {
         });
         let result = extract_input_schema(&op, None);
         assert!(result["properties"]["from_json"].is_object());
-        assert!(!result["properties"].as_object().unwrap().contains_key("from_vnd"));
+        assert!(!result["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("from_vnd"));
     }
 
     #[test]
@@ -1085,8 +1088,14 @@ mod tests {
             }
         });
         let result = extract_output_schema(&op, None);
-        assert!(result["properties"].as_object().unwrap().contains_key("from200"));
-        assert!(!result["properties"].as_object().unwrap().contains_key("from202"));
+        assert!(result["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("from200"));
+        assert!(!result["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("from202"));
     }
 
     #[test]
@@ -1106,7 +1115,10 @@ mod tests {
         assert_eq!(at_15["type"], "string", "depth 15 should resolve the $ref");
         // At depth 16 the ref IS ALSO resolved (>16 is the cut-off, not >=16)
         let at_16 = deep_resolve_refs(&schema, &doc, 16);
-        assert_eq!(at_16["type"], "string", "depth 16 should resolve the $ref (boundary fix)");
+        assert_eq!(
+            at_16["type"], "string",
+            "depth 16 should resolve the $ref (boundary fix)"
+        );
         // At depth 17 the schema is returned unchanged (cut-off)
         let at_17 = deep_resolve_refs(&schema, &doc, 17);
         assert!(
@@ -1190,7 +1202,10 @@ mod tests {
         });
         let result = extract_output_schema(&op, None);
         assert!(result["properties"]["from_json"].is_object());
-        assert!(!result["properties"].as_object().unwrap().contains_key("from_vnd"));
+        assert!(!result["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("from_vnd"));
     }
 
     #[test]
@@ -1205,7 +1220,11 @@ mod tests {
         schemas.insert("Leaf".into(), json!({"type": "string"}));
         // L15 references Leaf; L14 references L15; ... L0 references L1.
         for i in (0..16usize).rev() {
-            let target = if i == 15 { "Leaf".to_string() } else { format!("L{}", i + 1) };
+            let target = if i == 15 {
+                "Leaf".to_string()
+            } else {
+                format!("L{}", i + 1)
+            };
             schemas.insert(
                 format!("L{i}"),
                 json!({"$ref": format!("#/components/schemas/{target}")}),
