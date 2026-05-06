@@ -22,7 +22,7 @@ use crate::types::ScannedModule;
 
 /// Errors returned by [`HTTPProxyRegistryWriter::new`].
 #[derive(Debug, Error)]
-pub enum HTTPProxyWriterError {
+pub enum HTTPProxyRegistryWriterError {
     /// `base_url` is not a valid URL or uses a non-http(s) scheme.
     #[error("invalid base_url: {0}")]
     InvalidBaseUrl(String),
@@ -63,26 +63,27 @@ impl HTTPProxyRegistryWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`HTTPProxyWriterError::InvalidBaseUrl`] if `base_url` is not a valid URL
+    /// Returns [`HTTPProxyRegistryWriterError::InvalidBaseUrl`] if `base_url` is not a valid URL
     /// or its scheme is not `http` or `https` (SSRF prevention).
-    /// Returns [`HTTPProxyWriterError::InvalidTimeout`] if `timeout_secs` is not a
+    /// Returns [`HTTPProxyRegistryWriterError::InvalidTimeout`] if `timeout_secs` is not a
     /// positive finite number.
     pub fn new(
         base_url: String,
         auth_header_factory: Option<Box<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
         timeout_secs: f64,
-    ) -> Result<Self, HTTPProxyWriterError> {
-        let parsed = reqwest::Url::parse(&base_url)
-            .map_err(|e| HTTPProxyWriterError::InvalidBaseUrl(format!("'{}': {e}", base_url)))?;
+    ) -> Result<Self, HTTPProxyRegistryWriterError> {
+        let parsed = reqwest::Url::parse(&base_url).map_err(|e| {
+            HTTPProxyRegistryWriterError::InvalidBaseUrl(format!("'{}': {e}", base_url))
+        })?;
         if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(HTTPProxyWriterError::InvalidBaseUrl(format!(
+            return Err(HTTPProxyRegistryWriterError::InvalidBaseUrl(format!(
                 "scheme '{}' is not allowed — only http and https are permitted",
                 parsed.scheme()
             )));
         }
 
         if !timeout_secs.is_finite() || timeout_secs <= 0.0 {
-            return Err(HTTPProxyWriterError::InvalidTimeout(format!(
+            return Err(HTTPProxyRegistryWriterError::InvalidTimeout(format!(
                 "must be a positive finite number, got {timeout_secs}"
             )));
         }
@@ -91,7 +92,9 @@ impl HTTPProxyRegistryWriter {
             .timeout(std::time::Duration::from_secs_f64(timeout_secs))
             .build()
             .map_err(|e| {
-                HTTPProxyWriterError::InvalidBaseUrl(format!("failed to build HTTP client: {e}"))
+                HTTPProxyRegistryWriterError::InvalidBaseUrl(format!(
+                    "failed to build HTTP client: {e}"
+                ))
             })?;
 
         Ok(Self {

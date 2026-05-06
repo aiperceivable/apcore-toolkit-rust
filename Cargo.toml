@@ -42,8 +42,19 @@ features = ["json"]
 optional = true
 
 [features]
-default = []
+# `http-proxy` is enabled by default so a vanilla `cargo add apcore-toolkit`
+# exposes the same public API surface (`HTTPProxyRegistryWriter`) as the
+# Python and TypeScript SDKs. Consumers who want a lean default build that
+# omits the `reqwest` dependency can opt out with `default-features = false`.
+default = ["http-proxy"]
 http-proxy = ["dep:reqwest"]
+
+[lints.clippy]
+# Match the project's pre-commit gate (Makefile + hooks/) — block warnings
+# at the lint pass rather than relying solely on `cargo clippy -- -D warnings`
+# in CI. Using `priority = -1` on `all` lets specific allow-list overrides
+# layer on top without losing the deny-all baseline.
+all = { level = "deny", priority = -1 }
 
 [dev-dependencies]
 tokio-test = "0.4"

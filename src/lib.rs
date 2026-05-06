@@ -91,4 +91,4 @@ pub use serializers::{annotations_to_dict, module_to_dict, modules_to_dicts};
 pub use types::ScannedModule;
 
 #[cfg(feature = "http-proxy")]
-pub use output::http_proxy_writer::{HTTPProxyRegistryWriter, HTTPProxyWriterError};
+pub use output::http_proxy_writer::{HTTPProxyRegistryWriter, HTTPProxyRegistryWriterError};

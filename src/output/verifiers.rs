@@ -187,7 +187,18 @@ impl Verifier for RegistryVerifier<'_> {
 ///
 /// Each verifier call is wrapped in `catch_unwind` so that a panicking
 /// verifier does not crash the caller. A panic is reported as a
-/// `VerifyResult::fail` with a descriptive message.
+/// `VerifyResult::fail` with the spec-mandated literal prefix
+/// `"Verifier crashed:"` so cross-language callers can match the same
+/// prefix produced by the Python and TypeScript SDKs.
+///
+/// Cross-language note: Python and TypeScript additionally append the
+/// concrete verifier class name to the crash message for diagnosability
+/// (e.g. `"Verifier crashed: <msg> (verifier: ExplodingVerifier)"`). Rust
+/// uses `&dyn Verifier` trait objects which erase concrete type
+/// information at runtime, so the verifier name cannot be recovered
+/// without a `name()` method on the trait. To keep the trait minimal and
+/// the public API stable, Rust crash messages omit the identity suffix —
+/// this is an intentional, language-idiomatic asymmetry, not a defect.
 pub fn run_verifier_chain(
     verifiers: &[&dyn Verifier],
     path: &str,
