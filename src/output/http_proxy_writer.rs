@@ -16,6 +16,7 @@ use apcore::errors::ModuleError;
 use apcore::module::Module;
 use apcore::Registry;
 
+use crate::http_verb_map::extract_path_param_names;
 use crate::output::types::WriteResult;
 use crate::types::ScannedModule;
 
@@ -106,7 +107,7 @@ impl HTTPProxyRegistryWriter {
 
         for module in modules {
             let (http_method, url_path) = get_http_fields(module);
-            let path_params = extract_path_params(&url_path);
+            let path_params = extract_path_param_names(&url_path);
             let proxy = ProxyModule {
                 base_url: self.base_url.clone(),
                 http_method,
@@ -196,7 +197,11 @@ fn validate_path_params_filled(actual_path: &str) -> Result<(), String> {
     }
 }
 
-/// Percent-encode a path segment value (RFC 3986 unreserved chars pass through).
+/// Percent-encode a single path segment value (RFC 3986 §2.3 unreserved chars pass through).
+///
+/// This is intentionally a private helper — it encodes exactly the characters
+/// that are unsafe in a URL path segment. Unreserved characters (`A-Z a-z 0-9 - . _ ~`)
+/// are passed through unchanged; all other bytes are percent-encoded as `%XX`.
 fn percent_encode_path_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -209,19 +214,11 @@ fn percent_encode_path_segment(s: &str) -> String {
     out
 }
 
-/// Extract path parameter names from a URL pattern like `/users/{user_id}`.
-fn extract_path_params(url_path: &str) -> HashSet<String> {
-    PATH_PARAM_RE
-        .captures_iter(url_path)
-        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-        .collect()
-}
-
 /// Extract a human-readable error message from an HTTP error response body.
 ///
-/// Tries to parse the body as JSON and looks for common error fields
-/// (`error_message`, `detail`, `error`, `message`) before falling back
-/// to a safely-truncated version of the raw text.
+/// Private helper — tries to parse the body as JSON and looks for common error fields
+/// (`error_message`, `detail`, `error`, `message`) in that priority order, before
+/// falling back to a safely-truncated version of the raw text (max 200 characters).
 fn extract_error_message(body: &str) -> String {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
         for key in &["error_message", "detail", "error", "message"] {
@@ -242,6 +239,9 @@ fn extract_error_message(body: &str) -> String {
 
 /// Truncate a string to at most `max_chars` characters without panicking
 /// on multi-byte UTF-8 boundaries.
+///
+/// Private helper — counts Unicode scalar values (chars), not bytes, so that
+/// multi-byte sequences (e.g. emoji) are each counted as one character.
 fn safe_truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_extract_path_params() {
-        let params = extract_path_params("/users/{user_id}/tasks/{task_id}");
+        let params = extract_path_param_names("/users/{user_id}/tasks/{task_id}");
         assert!(params.contains("user_id"));
         assert!(params.contains("task_id"));
         assert_eq!(params.len(), 2);
@@ -464,8 +464,30 @@ mod tests {
 
     #[test]
     fn test_extract_path_params_none() {
-        let params = extract_path_params("/users");
+        let params = extract_path_param_names("/users");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_extract_path_params_colon_style() {
+        // Regression test: colon-style params must not be silently dropped.
+        // The private PATH_PARAM_RE only handled brace-style; this test
+        // verifies that extract_path_param_names (from http_verb_map) handles
+        // both styles correctly.
+        let params = extract_path_param_names("/users/:id");
+        assert!(
+            params.contains("id"),
+            "colon-style param ':id' should be recognised; got: {params:?}"
+        );
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_path_params_mixed_styles() {
+        let params = extract_path_param_names("/users/:user_id/tasks/{task_id}");
+        assert!(params.contains("user_id"));
+        assert!(params.contains("task_id"));
+        assert_eq!(params.len(), 2);
     }
 
     #[test]

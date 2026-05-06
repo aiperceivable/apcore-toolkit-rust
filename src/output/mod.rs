@@ -35,7 +35,7 @@ pub enum OutputFormat {
     Registry,
     /// Register modules as HTTP proxy modules (requires `http-proxy` feature).
     #[cfg(feature = "http-proxy")]
-    HttpProxy,
+    HTTPProxy,
 }
 
 /// Convenience factory that returns the `OutputFormat` variant for a given
@@ -47,7 +47,7 @@ pub enum OutputFormat {
 /// |-------|---------|
 /// | `"yaml"` | `OutputFormat::Yaml` |
 /// | `"registry"` | `OutputFormat::Registry` |
-/// | `"http_proxy"` / `"http-proxy"` / `"httpproxy"` | `OutputFormat::HttpProxy` |
+/// | `"http_proxy"` / `"http-proxy"` / `"httpproxy"` | `OutputFormat::HTTPProxy` |
 ///
 /// Returns `Err` for unrecognised strings.
 ///
@@ -64,9 +64,9 @@ pub enum OutputFormat {
 /// match fmt {
 ///     OutputFormat::Yaml => { /* use YAMLWriter */ }
 ///     OutputFormat::Registry => { /* use RegistryWriter */ }
-///     // OutputFormat::HttpProxy (feature "http-proxy") => use HTTPProxyRegistryWriter
+///     // OutputFormat::HTTPProxy (feature "http-proxy") => use HTTPProxyRegistryWriter
 ///     #[allow(unreachable_patterns)]
-///     _ => { /* other variants (e.g. HttpProxy when the `http-proxy` feature is enabled) */ }
+///     _ => { /* other variants (e.g. HTTPProxy when the `http-proxy` feature is enabled) */ }
 /// }
 /// ```
 pub fn get_writer(format: &str) -> Result<OutputFormat, OutputFormatError> {
@@ -74,7 +74,7 @@ pub fn get_writer(format: &str) -> Result<OutputFormat, OutputFormatError> {
         "yaml" => Ok(OutputFormat::Yaml),
         "registry" => Ok(OutputFormat::Registry),
         #[cfg(feature = "http-proxy")]
-        "http_proxy" | "http-proxy" | "httpproxy" => Ok(OutputFormat::HttpProxy),
+        "http_proxy" | "http-proxy" | "httpproxy" => Ok(OutputFormat::HTTPProxy),
         _ => Err(OutputFormatError::Unknown(format.to_string())),
     }
 }
@@ -96,9 +96,9 @@ mod tests {
     #[cfg(feature = "http-proxy")]
     #[test]
     fn test_get_writer_http_proxy_variants() {
-        assert_eq!(get_writer("http_proxy"), Ok(OutputFormat::HttpProxy));
-        assert_eq!(get_writer("http-proxy"), Ok(OutputFormat::HttpProxy));
-        assert_eq!(get_writer("httpproxy"), Ok(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("http_proxy"), Ok(OutputFormat::HTTPProxy));
+        assert_eq!(get_writer("http-proxy"), Ok(OutputFormat::HTTPProxy));
+        assert_eq!(get_writer("httpproxy"), Ok(OutputFormat::HTTPProxy));
     }
 
     #[test]
@@ -110,7 +110,7 @@ mod tests {
     #[cfg(feature = "http-proxy")]
     #[test]
     fn test_get_writer_case_insensitive_http_proxy() {
-        assert_eq!(get_writer("HTTP_PROXY"), Ok(OutputFormat::HttpProxy));
+        assert_eq!(get_writer("HTTP_PROXY"), Ok(OutputFormat::HTTPProxy));
     }
 
     #[test]

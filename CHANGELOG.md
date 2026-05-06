@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [0.5.1] - 2026-05-06
+
+### Changed
+- Version alignment with apcore-toolkit-typescript 0.5.1 (no functional changes)
+
 ## [0.5.0] - 2026-04-21
 
 Aligned release across Python, TypeScript, and Rust. Tracks apcore 0.19.0 features (expanded `ModuleAnnotations`, `display` field). The prior `0.5.0-rc.1` pre-release tag has been folded into this entry; the final `0.5.0` ships with the full cross-SDK parity audit completed.

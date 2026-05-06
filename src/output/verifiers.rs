@@ -67,10 +67,10 @@ impl Verifier for YAMLVerifier {
         for (i, entry) in bindings_seq.iter().enumerate() {
             for field in &["module_id", "target"] {
                 match entry.get(*field) {
-                    Some(v) if !v.is_null() => {}
+                    Some(serde_yaml_ng::Value::String(s)) if !s.trim().is_empty() => {}
                     _ => {
                         return VerifyResult::fail(format!(
-                            "Missing required field '{field}' in binding at index {i}"
+                            "Entry {i}: missing or invalid '{field}' field"
                         ))
                     }
                 }
@@ -305,6 +305,32 @@ mod tests {
         let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("target"));
+    }
+
+    #[test]
+    fn test_yaml_verifier_whitespace_only_module_id() {
+        // D11-007: whitespace-only module_id must be rejected, not accepted.
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "bindings:\n  - module_id: \"   \"\n    target: app:func").unwrap();
+        let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok, "whitespace-only module_id should be rejected");
+        assert!(
+            result.error.unwrap().contains("module_id"),
+            "error should mention the invalid field"
+        );
+    }
+
+    #[test]
+    fn test_yaml_verifier_integer_module_id() {
+        // D11-007: integer module_id (non-string) must be rejected.
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "bindings:\n  - module_id: 42\n    target: app:func").unwrap();
+        let result = YAMLVerifier.verify(f.path().to_str().unwrap(), "test");
+        assert!(!result.ok, "integer module_id should be rejected");
+        assert!(
+            result.error.unwrap().contains("module_id"),
+            "error should mention the invalid field"
+        );
     }
 
     #[test]

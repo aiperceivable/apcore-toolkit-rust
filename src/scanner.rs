@@ -157,22 +157,20 @@ pub fn deduplicate_ids(modules: Vec<ScannedModule>) -> Vec<ScannedModule> {
 /// Infer behavioral annotations from an HTTP method.
 ///
 /// Mapping:
-/// - GET     -> readonly=true, cacheable=true
-/// - HEAD    -> readonly=true (inspection-only, no body)
-/// - OPTIONS -> readonly=true (metadata query, no mutation)
-/// - DELETE  -> destructive=true
-/// - PUT     -> idempotent=true
-/// - POST    -> default (all false; creates resources, not idempotent by spec)
-/// - PATCH   -> default (partial update, not standardly idempotent)
+/// - GET    -> readonly=true, cacheable=true
+/// - DELETE -> destructive=true
+/// - PUT    -> idempotent=true
+/// - POST   -> default (all false; creates resources, not idempotent by spec)
+/// - PATCH  -> default (partial update, not standardly idempotent)
+/// - HEAD / OPTIONS / unknown -> default (all false)
+///
+/// Note: HEAD and OPTIONS intentionally return all-false defaults to match
+/// the Python and TypeScript implementations. They do NOT receive readonly=true.
 pub fn infer_annotations_from_method(method: &str) -> ModuleAnnotations {
     match method.to_uppercase().as_str() {
         "GET" => ModuleAnnotations {
             readonly: true,
             cacheable: true,
-            ..Default::default()
-        },
-        "HEAD" | "OPTIONS" => ModuleAnnotations {
-            readonly: true,
             ..Default::default()
         },
         "DELETE" => ModuleAnnotations {
@@ -408,17 +406,22 @@ mod tests {
 
     #[test]
     fn test_infer_annotations_head() {
+        // Regression test (D10-001): HEAD must return all-false defaults,
+        // matching Python and TypeScript behavior. Previously returned readonly=true.
         let ann = infer_annotations_from_method("HEAD");
-        assert!(ann.readonly, "HEAD should be readonly");
-        assert!(!ann.cacheable, "HEAD should not be cacheable (no body)");
+        assert!(!ann.readonly, "HEAD should NOT be readonly (matches Python/TS)");
+        assert!(!ann.cacheable);
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
     }
 
     #[test]
     fn test_infer_annotations_options() {
+        // Regression test (D10-001): OPTIONS must return all-false defaults,
+        // matching Python and TypeScript behavior. Previously returned readonly=true.
         let ann = infer_annotations_from_method("OPTIONS");
-        assert!(ann.readonly, "OPTIONS should be readonly");
+        assert!(!ann.readonly, "OPTIONS should NOT be readonly (matches Python/TS)");
+        assert!(!ann.cacheable);
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
     }
@@ -426,7 +429,7 @@ mod tests {
     #[test]
     fn test_infer_annotations_head_case_insensitive() {
         let ann = infer_annotations_from_method("head");
-        assert!(ann.readonly);
+        assert!(!ann.readonly, "HEAD (lowercase) should also return all-false defaults");
     }
 
     #[test]

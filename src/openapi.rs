@@ -73,9 +73,10 @@ pub fn resolve_schema(schema: &Value, openapi_doc: Option<&Value>) -> Value {
 /// Handles `$ref`, `allOf`, `anyOf`, `oneOf`, `items`, `prefixItems`,
 /// `properties`, `patternProperties`, `additionalProperties`, `not`,
 /// and `if`/`then`/`else`.
-/// Depth-limited to 16 levels to prevent infinite recursion.
+/// Depth-limited: resolves through depth 16 (cuts off at depth > 16),
+/// matching the Python and TypeScript implementations.
 pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> Value {
-    if depth >= 16 {
+    if depth > 16 {
         warn!(depth, "deep_resolve_refs: depth limit reached — returning schema as-is to prevent infinite recursion");
         return schema.clone();
     }
@@ -202,13 +203,21 @@ pub fn extract_input_schema(operation: &Value, openapi_doc: Option<&Value>) -> V
         }
     }
 
-    // Request body
-    if let Some(body_schema) = operation
+    // Request body — try "application/json" first, then "application/vnd.api+json"
+    // as a fallback. This matches the Python implementation which iterates all
+    // content-type keys and accepts both.
+    let body_content = operation
         .get("requestBody")
-        .and_then(|rb| rb.get("content"))
+        .and_then(|rb| rb.get("content"));
+    let body_schema_opt = body_content
         .and_then(|c| c.get("application/json"))
         .and_then(|jc| jc.get("schema"))
-    {
+        .or_else(|| {
+            body_content
+                .and_then(|c| c.get("application/vnd.api+json"))
+                .and_then(|jc| jc.get("schema"))
+        });
+    if let Some(body_schema) = body_schema_opt {
         let resolved = resolve_schema(body_schema, openapi_doc);
         if let Some(props) = resolved.get("properties").and_then(|p| p.as_object()) {
             for (k, v) in props {
@@ -243,22 +252,49 @@ pub fn extract_input_schema(operation: &Value, openapi_doc: Option<&Value>) -> V
     })
 }
 
-/// Extract output schema from OpenAPI operation responses (200/201).
+/// Extract output schema from OpenAPI operation responses.
 ///
 /// Returns the output JSON Schema, or a default empty object schema.
+///
+/// Accepts any 2xx status code (200–299), matching the TypeScript implementation
+/// which filters on /^2\d\d$/. Codes are checked in lexicographic order so
+/// 200 is preferred over 201, 201 over 202, and so on.
 pub fn extract_output_schema(operation: &Value, openapi_doc: Option<&Value>) -> Value {
     let responses = match operation.get("responses") {
         Some(r) => r,
         None => return json!({"type": "object", "properties": {}}),
     };
 
-    for status_code in &["200", "201"] {
-        if let Some(schema) = responses
+    // Collect all 2xx response keys and sort them so lower codes take priority.
+    let responses_obj = match responses.as_object() {
+        Some(obj) => obj,
+        None => return json!({"type": "object", "properties": {}}),
+    };
+    let mut success_codes: Vec<&str> = responses_obj
+        .keys()
+        .filter_map(|k| {
+            let k_str = k.as_str();
+            if k_str.len() == 3
+                && k_str.starts_with('2')
+                && k_str.chars().skip(1).all(|c| c.is_ascii_digit())
+            {
+                Some(k_str)
+            } else {
+                None
+            }
+        })
+        .collect();
+    success_codes.sort();
+
+    for status_code in &success_codes {
+        let json_content = responses
             .get(*status_code)
             .and_then(|r| r.get("content"))
-            .and_then(|c| c.get("application/json"))
-            .and_then(|jc| jc.get("schema"))
-        {
+            .and_then(|c| {
+                c.get("application/json")
+                    .or_else(|| c.get("application/vnd.api+json"))
+            });
+        if let Some(schema) = json_content.and_then(|jc| jc.get("schema")) {
             let mut resolved = resolve_schema(schema, openapi_doc);
             if let Some(doc) = openapi_doc {
                 resolved = deep_resolve_refs(&resolved, doc, 0);
@@ -918,8 +954,145 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_output_schema_202() {
+        // Regression test (D10-002): 202 Accepted must be recognised.
+        // Previously only 200/201 were checked; 202/203 were silently ignored.
+        let op = json!({
+            "responses": {
+                "202": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"job_id": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert_eq!(
+            result["properties"]["job_id"]["type"], "string",
+            "202 response schema should be extracted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_output_schema_203() {
+        // Regression test (D10-002): 203 Non-Authoritative Information must be recognised.
+        let op = json!({
+            "responses": {
+                "203": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"cached": {"type": "boolean"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert_eq!(
+            result["properties"]["cached"]["type"], "boolean",
+            "203 response schema should be extracted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_input_schema_vnd_api_json() {
+        // Regression test (Issue #32): application/vnd.api+json must be accepted
+        // as a fallback when application/json is absent, matching Python behavior.
+        let op = json!({
+            "requestBody": {
+                "content": {
+                    "application/vnd.api+json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"data": {"type": "object"}},
+                            "required": ["data"]
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_input_schema(&op, None);
+        assert!(
+            result["properties"]["data"].is_object(),
+            "vnd.api+json schema properties should be extracted; got: {result:?}"
+        );
+        let req = result["required"].as_array().unwrap();
+        assert!(
+            req.contains(&Value::String("data".into())),
+            "required field from vnd.api+json schema should be present; got: {req:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_input_schema_json_preferred_over_vnd_api_json() {
+        // application/json takes priority over application/vnd.api+json.
+        let op = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"from_json": {"type": "string"}}
+                        }
+                    },
+                    "application/vnd.api+json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"from_vnd": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_input_schema(&op, None);
+        assert!(result["properties"]["from_json"].is_object());
+        assert!(!result["properties"].as_object().unwrap().contains_key("from_vnd"));
+    }
+
+    #[test]
+    fn test_extract_output_schema_200_preferred_over_202() {
+        // 200 should be picked over 202 when both exist.
+        let op = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"from200": {"type": "string"}}
+                            }
+                        }
+                    }
+                },
+                "202": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"from202": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert!(result["properties"].as_object().unwrap().contains_key("from200"));
+        assert!(!result["properties"].as_object().unwrap().contains_key("from202"));
+    }
+
+    #[test]
     fn test_deep_resolve_depth_limit_at_exactly_16() {
-        // Depth 15 should still resolve; depth 16 should be the cut-off.
+        // Regression test (D10-004): depth boundary must be > 16 (cut off AT depth 17),
+        // not >= 16. Python and TypeScript resolve through depth 16; Rust must match.
         let doc = json!({
             "components": {
                 "schemas": {
@@ -928,14 +1101,122 @@ mod tests {
             }
         });
         let schema = json!({"$ref": "#/components/schemas/Leaf"});
-        // At depth 15 the ref IS resolved (< 16)
+        // At depth 15 the ref IS resolved
         let at_15 = deep_resolve_refs(&schema, &doc, 15);
         assert_eq!(at_15["type"], "string", "depth 15 should resolve the $ref");
-        // At depth 16 the schema is returned unchanged (cut-off)
+        // At depth 16 the ref IS ALSO resolved (>16 is the cut-off, not >=16)
         let at_16 = deep_resolve_refs(&schema, &doc, 16);
+        assert_eq!(at_16["type"], "string", "depth 16 should resolve the $ref (boundary fix)");
+        // At depth 17 the schema is returned unchanged (cut-off)
+        let at_17 = deep_resolve_refs(&schema, &doc, 17);
         assert!(
-            at_16.get("$ref").is_some(),
-            "depth 16 must return schema unchanged"
+            at_17.get("$ref").is_some(),
+            "depth 17 must return schema unchanged"
+        );
+    }
+
+    #[test]
+    fn test_extract_output_schema_204() {
+        // D11-001: any 2xx code should be accepted. 204 No Content (with a schema)
+        // must be extracted, not silently ignored.
+        let op = json!({
+            "responses": {
+                "204": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"accepted": {"type": "boolean"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert_eq!(
+            result["properties"]["accepted"]["type"], "boolean",
+            "204 response schema should be extracted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_output_schema_vnd_api_json_output() {
+        // D11-002: application/vnd.api+json should be accepted as a fallback for
+        // output schemas, matching Python behaviour.
+        let op = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/vnd.api+json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"data": {"type": "object"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert!(
+            result["properties"]["data"].is_object(),
+            "vnd.api+json output schema properties should be extracted; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_output_schema_json_preferred_over_vnd_api_json_output() {
+        // application/json takes priority over application/vnd.api+json for outputs.
+        let op = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"from_json": {"type": "string"}}
+                            }
+                        },
+                        "application/vnd.api+json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"from_vnd": {"type": "string"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert!(result["properties"]["from_json"].is_object());
+        assert!(!result["properties"].as_object().unwrap().contains_key("from_vnd"));
+    }
+
+    #[test]
+    fn test_deep_resolve_16_levels_of_nesting() {
+        // Regression test (D10-004): a chain of exactly 16 $ref levels must
+        // be fully resolved. With the old >= 16 boundary, level 16 was cut off.
+        //
+        // Build: L0 -> L1 -> L2 -> ... -> L15 -> Leaf
+        // That is 16 hops (depth 0 enters L0, depth 1 enters L1, ...,
+        // depth 15 enters L15, depth 16 resolves the $ref inside L15 to Leaf).
+        let mut schemas = serde_json::Map::new();
+        schemas.insert("Leaf".into(), json!({"type": "string"}));
+        // L15 references Leaf; L14 references L15; ... L0 references L1.
+        for i in (0..16usize).rev() {
+            let target = if i == 15 { "Leaf".to_string() } else { format!("L{}", i + 1) };
+            schemas.insert(
+                format!("L{i}"),
+                json!({"$ref": format!("#/components/schemas/{target}")}),
+            );
+        }
+        let doc = json!({"components": {"schemas": schemas}});
+        let schema = json!({"$ref": "#/components/schemas/L0"});
+        let result = deep_resolve_refs(&schema, &doc, 0);
+        assert_eq!(
+            result["type"], "string",
+            "16-level deep $ref chain should be fully resolved; got: {result:?}"
         );
     }
 }

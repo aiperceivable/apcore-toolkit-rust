@@ -84,6 +84,15 @@ impl Default for RegistryWriter {
 impl RegistryWriter {
     /// Create a RegistryWriter with passthrough handlers (schema-only registration).
     ///
+    /// # Handler resolution
+    ///
+    /// Unlike the Python and TypeScript implementations which dynamically import
+    /// the target function at write time (`resolve_target`), the Rust implementation
+    /// registers a passthrough handler that echoes its inputs when no HandlerFactory
+    /// is configured. This means calling a module registered by this writer will
+    /// succeed but will not execute real business logic. To register real handlers,
+    /// use the HandlerFactory integration.
+    ///
     /// # Panics
     ///
     /// This constructor does not panic. However, note that without a `HandlerFactory`,
@@ -318,6 +327,46 @@ mod tests {
         let mut registry = Registry::new();
         let results = writer.write(&[], &mut registry, false, false, None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_custom_verifier_runs_even_when_verify_false() {
+        // D11-011: verify=false skips the built-in registry check, but custom
+        // verifiers must still run. A failing custom verifier with verify=false
+        // should produce a result with verified=false.
+        use crate::output::types::{Verifier, VerifyResult};
+
+        struct AlwaysFail;
+        impl Verifier for AlwaysFail {
+            fn verify(&self, _path: &str, _module_id: &str) -> VerifyResult {
+                VerifyResult::fail("custom verifier failed".into())
+            }
+        }
+
+        let writer = RegistryWriter::new();
+        let mut registry = Registry::new();
+        let modules = vec![sample_module()];
+        let failing_verifier = AlwaysFail;
+        let verifiers: &[&dyn Verifier] = &[&failing_verifier];
+        // verify=false: built-in registry check skipped, but custom verifier runs
+        let results = writer.write(&modules, &mut registry, false, false, Some(verifiers));
+        assert_eq!(results.len(), 1);
+        // Module was registered successfully
+        assert!(registry.has("users.get"));
+        // But custom verifier ran and failed — verified must be false
+        assert!(
+            !results[0].verified,
+            "custom verifier must run even when verify=false; result: {:?}",
+            results[0]
+        );
+        assert!(
+            results[0]
+                .verification_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("custom verifier failed"),
+            "verification_error should contain the custom verifier message"
+        );
     }
 
     #[test]

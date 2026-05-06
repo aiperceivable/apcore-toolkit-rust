@@ -1,3 +1,8 @@
+// All-caps acronyms (AIEnhancer, HTTPProxy*, YAML*, JSON*) are intentional:
+// these names match the Python and TypeScript SDK public surfaces for cross-language
+// parity. Clippy's C-CASE recommendation is waived for this crate.
+#![allow(clippy::upper_case_acronyms)]
+
 //! apcore-toolkit — Shared scanner, schema extraction, and output toolkit.
 //!
 //! Rust implementation — tri-language parity with Python and TypeScript.

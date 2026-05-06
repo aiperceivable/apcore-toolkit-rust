@@ -120,6 +120,13 @@ impl BindingLoader {
     ///
     /// When `recursive` is `true`, subdirectories are traversed depth-first using
     /// `walkdir`. When `false` (default), only the immediate directory is scanned.
+    ///
+    /// # OS error handling vs. TypeScript
+    ///
+    /// Note: unlike the TypeScript implementation which warns and continues on OS
+    /// permission errors (EACCES/EPERM), this implementation propagates any IO error
+    /// as `BindingLoadError::FileRead` and aborts the entire load. This is the
+    /// fail-fast behavior.
     pub fn load(
         &self,
         path: &Path,

@@ -28,6 +28,13 @@ impl YAMLWriter {
     /// - `dry_run`: If true, return results without writing to disk.
     /// - `verify`: If true, verify written files are valid YAML with required fields.
     /// - `verifiers`: Optional custom verifiers run after the built-in check.
+    ///
+    /// # Error handling vs. Python/TypeScript
+    ///
+    /// Unlike the Python and TypeScript implementations which raise/throw on I/O
+    /// failures, this method returns `Err(WriteError)` for any I/O error (e.g.
+    /// permission denied, disk full). Callers expecting the Python/TypeScript error
+    /// contract should propagate errors with `?` or handle them via `match`.
     pub fn write(
         &self,
         modules: &[ScannedModule],
@@ -54,6 +61,12 @@ impl YAMLWriter {
 
         let mut results: Vec<WriteResult> = Vec::new();
         let timestamp = Utc::now().to_rfc3339();
+        // Track filenames written in this batch to detect collisions within a single
+        // write() call. When two module_ids sanitize to the same filename, the second
+        // and subsequent modules receive a numeric suffix (e.g. `foo_1.binding.yaml`).
+        // This matches the TypeScript YAMLWriter collision-avoidance behaviour.
+        let mut written_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for module in modules {
             let binding_data = build_binding(module);
@@ -66,8 +79,18 @@ impl YAMLWriter {
             // sanitize_filename removes all unsafe chars and collapses consecutive dots,
             // ensuring the resulting filename cannot escape output_path.
             let safe_id = sanitize_filename(&module.module_id);
-            let filename = format!("{safe_id}.binding.yaml");
-            let file_path = output_path.join(&filename);
+            let base_filename = format!("{safe_id}.binding.yaml");
+
+            // Resolve filename collision within this batch.
+            let mut final_filename = base_filename.clone();
+            let mut counter = 0u32;
+            while written_names.contains_key(&final_filename) {
+                counter += 1;
+                final_filename = format!("{safe_id}_{counter}.binding.yaml");
+            }
+            written_names.insert(final_filename.clone(), module.module_id.clone());
+
+            let file_path = output_path.join(&final_filename);
 
             if file_path.exists() {
                 warn!(file_path = %file_path.display(), "Overwriting existing file");
@@ -572,6 +595,44 @@ mod tests {
             bindings[0].get("suggested_alias").is_none(),
             "suggested_alias should be absent when module.suggested_alias is None"
         );
+    }
+
+    #[test]
+    fn test_filename_collision_produces_distinct_files() {
+        // D11-010: two modules whose module_ids both sanitize to the same filename
+        // must produce two distinct files in a single write() call.
+        // The second module receives a numeric suffix (e.g. `foo_1.binding.yaml`).
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+
+        // Both module_ids sanitize to "a_b" (slash → underscore)
+        let mod1 = ScannedModule::new(
+            "a/b".into(),
+            "Module slash".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec![],
+            "app:slash".into(),
+        );
+        let mod2 = ScannedModule::new(
+            "a_b".into(),
+            "Module underscore".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec![],
+            "app:underscore".into(),
+        );
+
+        let results = writer
+            .write(&[mod1, mod2], dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+        assert_eq!(results.len(), 2, "should produce two results");
+
+        let path1 = results[0].path.as_ref().expect("first result must have path");
+        let path2 = results[1].path.as_ref().expect("second result must have path");
+        assert_ne!(path1, path2, "collision must produce distinct file paths");
+        assert!(Path::new(path1).exists(), "first file must exist: {path1}");
+        assert!(Path::new(path2).exists(), "second file must exist: {path2}");
     }
 
     #[test]
