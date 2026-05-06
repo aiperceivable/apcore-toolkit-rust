@@ -2,20 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+
+## [0.6.0] - 2026-05-05
+
+### Changed
+
+- **`apcore` dependency bumped from `0.19` to `0.20`** — `Cargo.toml` `[dependencies]` now reads `apcore = "0.20"`; `Cargo.lock` regenerated to apcore 0.20.0. Previously the caret default `apcore = "0.19"` resolved to `>=0.19.0, <0.20.0`, hard-pinning below 0.20. Toolkit only `use`s stable crate surface (`apcore::Registry`, `apcore::context::Context`, `apcore::errors::ModuleError`, `apcore::module::{Module, ModuleAnnotations, ModuleExample}`); none of these were affected by 0.20.0 changes (which centred on `OverridesStore`, `RetryConfig::compute_delay_ms`, `TraceContext::inject_checked`, `TRACE_FLAGS_KEY`, and `ErrorCode::ConfigurationError`). Full lib test suite (380 passed) green against apcore 0.20.0.
 
 ### Added
 
-### Changed
-
-### Fixed
-
-### Removed
-
-## [0.5.1] - 2026-05-06
+- **Annotation-table cross-SDK alignment** — `format_module(.., ModuleStyle::Markdown | ModuleStyle::Skill, ..)` `## Behavior` table now emits only fields that differ from `ModuleAnnotations::default()`, sorts rows alphabetically by snake_case key (already the natural `serde_json::Map` iteration order under default features), and renders bool values as lowercase `true`/`false`. The section is omitted entirely when every annotation field matches its default. Closes the byte-equality gap with the Python and TypeScript SDKs.
+- **Surface-aware formatters** (refs aiperceivable/apcore-toolkit#13) — `format_module`, `format_schema`, `format_modules` for rendering `ScannedModule` and JSON Schema for specific consumer surfaces. Four `ModuleStyle` variants: `Markdown` (LLM context), `Skill` (drop-in `.claude/skills/<id>/SKILL.md` or `.gemini/skills/<id>/SKILL.md` body with minimal `name` + `description` frontmatter — no vendor-specific extensions), `TableRow` (CLI listing), `Json` (programmatic). Three `SchemaStyle` variants: `Prose`, `Table`, `Json`. `format_modules` adds optional `Option<GroupBy>` (`Tag` or `Prefix`). `display: bool` (default true upstream) prefers the `ScannedModule.display` overlay over raw fields. Returns are wrapped in a `FormatOutput` enum with `Text(String) | Value(serde_json::Value) | Values(Vec<Value>)` and `as_str` / `as_value` / `as_values` accessors. Lives in `formatting::surface`; re-exported at the crate root.
 
 ### Changed
-- Version alignment with apcore-toolkit-typescript 0.5.1 (no functional changes)
+
+- **`infer_annotations_from_method` HEAD/OPTIONS canonical mapping** (refs aiperceivable/apcore-toolkit#11) — already produced `readonly=true` for `HEAD` and `OPTIONS` (without `cacheable=true`), aligned with the canonical mapping declared in `apcore-toolkit/docs/features/scanning.md` and now also matched by Python and TypeScript. No code change needed in this SDK; an extra smoke test in `formatting::surface::tests::scanner_head_options_canonical_mapping` cross-references the new spec section.
 
 ## [0.5.0] - 2026-04-21
 
