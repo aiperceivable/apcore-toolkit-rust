@@ -175,6 +175,12 @@ fn get_http_fields(module: &ScannedModule) -> (String, String) {
     (http_method, url_path)
 }
 
+/// HTTP methods that conventionally carry a JSON request body. Other
+/// methods (`GET`, `HEAD`, `DELETE`, `OPTIONS`) forward non-path inputs
+/// via the query string so they are not silently dropped, matching the
+/// Python and TypeScript SDKs.
+const BODY_METHODS: &[&str] = &["POST", "PUT", "PATCH"];
+
 /// Regex matching URL path parameters like `{user_id}`.
 static PATH_PARAM_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{(\w+)\}").expect("static regex"));
@@ -288,6 +294,7 @@ impl Module for ProxyModule {
         let mut body: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
         if let Some(obj) = inputs.as_object() {
+            let uses_body = BODY_METHODS.contains(&self.http_method.as_str());
             for (key, value) in obj {
                 if self.path_params.contains(key) {
                     let val_str = match value {
@@ -298,14 +305,16 @@ impl Module for ProxyModule {
                         &format!("{{{key}}}"),
                         &percent_encode_path_segment(&val_str),
                     );
-                } else if self.http_method == "GET" {
+                } else if uses_body {
+                    body.insert(key.clone(), value.clone());
+                } else {
+                    // GET / HEAD / DELETE / OPTIONS — forward as query
+                    // string to mirror Python / TypeScript behaviour.
                     let val_str = match value {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
                     query.insert(key.clone(), val_str);
-                } else {
-                    body.insert(key.clone(), value.clone());
                 }
             }
         }
@@ -569,5 +578,21 @@ mod tests {
         let body = "\u{1F600}".repeat(300);
         let result = safe_truncate(&body, 200);
         assert_eq!(result.chars().count(), 200);
+    }
+
+    // D11-1 regression: BODY_METHODS = {POST, PUT, PATCH}. All other methods
+    // (GET, HEAD, DELETE, OPTIONS) MUST forward non-path inputs as the query
+    // string, mirroring Python and TypeScript. Previously Rust routed any
+    // non-GET method into the JSON body — DELETE proxies were emitting bodies
+    // that most servers ignore or reject (RFC 9110 §9.3.5).
+    #[test]
+    fn test_body_methods_set_contents() {
+        assert!(BODY_METHODS.contains(&"POST"));
+        assert!(BODY_METHODS.contains(&"PUT"));
+        assert!(BODY_METHODS.contains(&"PATCH"));
+        assert!(!BODY_METHODS.contains(&"GET"));
+        assert!(!BODY_METHODS.contains(&"DELETE"));
+        assert!(!BODY_METHODS.contains(&"HEAD"));
+        assert!(!BODY_METHODS.contains(&"OPTIONS"));
     }
 }

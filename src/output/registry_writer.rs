@@ -73,6 +73,12 @@ pub type HandlerFactory = Arc<dyn Fn(&str) -> Option<HandlerFn> + Send + Sync>;
 /// provide a [`HandlerFactory`] that resolves target strings to real handlers.
 pub struct RegistryWriter {
     handler_factory: Option<HandlerFactory>,
+    /// Optional allow-list of `target` prefixes. When set, any module whose
+    /// `target` does not start with one of these prefixes is rejected with a
+    /// failed `WriteResult` before any handler factory is invoked. Mirrors the
+    /// `allowed_prefixes` parameter on the Python and TypeScript SDKs and
+    /// provides a defence-in-depth boundary on dynamically-supplied targets.
+    allowed_prefixes: Option<Vec<String>>,
 }
 
 impl Default for RegistryWriter {
@@ -103,6 +109,7 @@ impl RegistryWriter {
     pub fn new() -> Self {
         Self {
             handler_factory: None,
+            allowed_prefixes: None,
         }
     }
 
@@ -110,6 +117,29 @@ impl RegistryWriter {
     pub fn with_handler_factory(factory: HandlerFactory) -> Self {
         Self {
             handler_factory: Some(factory),
+            allowed_prefixes: None,
+        }
+    }
+
+    /// Restrict registration to modules whose `target` starts with one of the
+    /// supplied prefixes. Modules with a non-matching target are rejected with
+    /// a failed `WriteResult` and never reach the handler factory.
+    ///
+    /// Matches the `allowed_prefixes` parameter on the Python `RegistryWriter`
+    /// and the TypeScript `allowedPrefixes` option. Use it to bound the set of
+    /// callable Python/Rust paths a binding YAML may resolve to (defence in
+    /// depth against forged or attacker-controlled `target` strings).
+    pub fn with_allowed_prefixes(mut self, prefixes: Vec<String>) -> Self {
+        self.allowed_prefixes = Some(prefixes);
+        self
+    }
+
+    /// Returns `true` when the module target is permitted by the configured
+    /// `allowed_prefixes` (or when no allow-list is configured).
+    fn target_allowed(&self, target: &str) -> bool {
+        match self.allowed_prefixes.as_ref() {
+            None => true,
+            Some(prefixes) => prefixes.iter().any(|p| target.starts_with(p.as_str())),
         }
     }
 }
@@ -142,6 +172,23 @@ impl RegistryWriter {
         for module in modules {
             if dry_run {
                 results.push(WriteResult::new(module.module_id.clone()));
+                continue;
+            }
+
+            if !self.target_allowed(&module.target) {
+                warn!(
+                    module_id = %module.module_id,
+                    target = %module.target,
+                    "RegistryWriter: target rejected by allowed_prefixes"
+                );
+                results.push(WriteResult::failed(
+                    module.module_id.clone(),
+                    None,
+                    format!(
+                        "target '{}' is not in allowed_prefixes — registration refused",
+                        module.target
+                    ),
+                ));
                 continue;
             }
 
@@ -397,5 +444,57 @@ mod tests {
         assert!(registry.has("mod.b"));
         assert!(results[0].verified);
         assert!(results[1].verified);
+    }
+
+    // D11-2 regression: allowed_prefixes is a defence-in-depth allow-list on
+    // the `target` field. A module whose target does not match any prefix
+    // must be rejected with a failed WriteResult and never registered.
+    #[test]
+    fn test_allowed_prefixes_rejects_non_matching_target() {
+        let writer =
+            RegistryWriter::new().with_allowed_prefixes(vec!["app:".into(), "myapp:".into()]);
+        let mut registry = Registry::new();
+        let allowed = sample_module(); // target = "app:get_user"
+        let denied = ScannedModule::new(
+            "evil.module".into(),
+            "Forged target".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec![],
+            "evil:run_attacker_code".into(),
+        );
+        let results = writer.write(&[allowed, denied], &mut registry, false, false, None);
+        assert_eq!(results.len(), 2);
+        // app:get_user is in allowed_prefixes — registered.
+        assert!(registry.has("users.get"));
+        assert!(results[0].verified);
+        // evil:* is not — rejected, NOT registered.
+        assert!(!registry.has("evil.module"));
+        assert!(!results[1].verified);
+        let err = results[1].verification_error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("allowed_prefixes"),
+            "rejection message should mention allowed_prefixes: got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_allowed_prefixes_default_none_admits_everything() {
+        // Without allowed_prefixes set, target_allowed must return true for
+        // every input — preserves existing behaviour for callers that have
+        // not opted in.
+        let writer = RegistryWriter::new();
+        let mut registry = Registry::new();
+        let module = ScannedModule::new(
+            "any.module".into(),
+            "Any target".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec![],
+            "anything-goes:func".into(),
+        );
+        let results = writer.write(&[module], &mut registry, false, false, None);
+        assert_eq!(results.len(), 1);
+        assert!(registry.has("any.module"));
     }
 }

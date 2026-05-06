@@ -20,6 +20,14 @@ use crate::types::ScannedModule;
 
 const SUPPORTED_SPEC_VERSIONS: &[&str] = &["1.0"];
 
+/// Keys whose presence in a metadata dict is unsafe for cross-runtime
+/// round-trip — they correspond to JS prototype-pollution sinks. They are
+/// stripped at parse time so a malicious or malformed binding YAML cannot
+/// carry an attacker-controlled `__proto__` / `constructor` / `prototype`
+/// entry into downstream consumers (matches the TypeScript loader's
+/// `PROTO_DENY` guard in `src/binding-parser.ts`).
+const FORBIDDEN_METADATA_KEYS: &[&str] = &["__proto__", "constructor", "prototype"];
+
 /// Maximum size of a single `.binding.yaml` file (16 MiB).
 ///
 /// A binding file is a structured YAML document, not a data store.
@@ -430,7 +438,22 @@ impl BindingLoader {
         let metadata: HashMap<String, Value> = entry
             .get("metadata")
             .and_then(|v| v.as_object())
-            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| {
+                        if FORBIDDEN_METADATA_KEYS.contains(&k.as_str()) {
+                            warn!(
+                                module_id = %module_id,
+                                key = %k,
+                                "BindingLoader: dropping forbidden metadata key (prototype-pollution guard)"
+                            );
+                            None
+                        } else {
+                            Some((k.clone(), v.clone()))
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let display = Self::parse_display(entry.get("display"), &module_id);
@@ -579,6 +602,35 @@ mod tests {
         assert!(m.tags.is_empty());
         assert_eq!(m.input_schema, json!({}));
         assert_eq!(m.output_schema, json!({}));
+    }
+
+    // D11-5b regression: `__proto__` / `constructor` / `prototype` keys in
+    // binding-YAML metadata must be dropped at parse time so they cannot
+    // propagate to JS-side consumers (cross-language prototype-pollution
+    // guard). Mirrors the TypeScript loader's `PROTO_DENY` and the Python
+    // loader's `_FORBIDDEN_METADATA_KEYS`.
+    #[test]
+    fn test_metadata_filters_proto_pollution_keys() {
+        let loader = BindingLoader::new();
+        let entry = json!({
+            "module_id": "x.y",
+            "target": "pkg:func",
+            "metadata": {
+                "__proto__": {"polluted": true},
+                "constructor": "evil",
+                "prototype": ["bad"],
+                "safe_key": "kept",
+            }
+        });
+        let modules = loader
+            .load_data(&json!({"bindings": [entry]}), false)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        let metadata = &modules[0].metadata;
+        assert!(!metadata.contains_key("__proto__"));
+        assert!(!metadata.contains_key("constructor"));
+        assert!(!metadata.contains_key("prototype"));
+        assert_eq!(metadata.get("safe_key"), Some(&json!("kept")));
     }
 
     #[test]
