@@ -3,10 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 
-## [0.6.0] - 2026-05-05
+## [0.6.0] - 2026-05-07
 
 ### Changed
 
+- **`apcore` dependency bumped from `0.20` to `0.21`** — `Cargo.toml` `[dependencies]` now reads `apcore = "0.21"`; `Cargo.lock` regenerated to apcore 0.21.0. The 0.21.0 additions (`discoverable` field on `ModuleAnnotations`, `PreviewResult`, `Change`, `ephemeral.*` namespace) are automatically handled — `serde_json::to_value` / `serde_json::from_value::<ModuleAnnotations>` pick up `discoverable` via the serde-derived impl, and `infer_annotations_from_method` uses `..Default::default()` so the new field propagates without code changes. Full lib test suite verified against apcore 0.21.0.
 - **`apcore` dependency bumped from `0.19` to `0.20`** — `Cargo.toml` `[dependencies]` now reads `apcore = "0.20"`; `Cargo.lock` regenerated to apcore 0.20.0. Previously the caret default `apcore = "0.19"` resolved to `>=0.19.0, <0.20.0`, hard-pinning below 0.20. Toolkit only `use`s stable crate surface (`apcore::Registry`, `apcore::context::Context`, `apcore::errors::ModuleError`, `apcore::module::{Module, ModuleAnnotations, ModuleExample}`); none of these were affected by 0.20.0 changes (which centred on `OverridesStore`, `RetryConfig::compute_delay_ms`, `TraceContext::inject_checked`, `TRACE_FLAGS_KEY`, and `ErrorCode::ConfigurationError`). Full lib test suite (380 passed) green against apcore 0.20.0.
 
 ### Added

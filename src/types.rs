@@ -189,11 +189,13 @@ mod tests {
             }),
             documentation: Some("Full documentation string".into()),
             suggested_alias: None,
-            examples: vec![ModuleExample {
-                title: "Example 1".into(),
-                description: Some("An example".into()),
-                inputs: json!({"x": 1}),
-                output: json!({"y": 2}),
+            examples: vec![{
+                let mut ex = ModuleExample::default();
+                ex.title = "Example 1".into();
+                ex.description = Some("An example".into());
+                ex.inputs = json!({"x": 1});
+                ex.output = json!({"y": 2});
+                ex
             }],
             metadata: {
                 let mut map = HashMap::new();

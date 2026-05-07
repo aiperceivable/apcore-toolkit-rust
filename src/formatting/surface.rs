@@ -751,11 +751,12 @@ mod tests {
     #[test]
     fn module_markdown_examples_block() {
         let mut m = fixture_module();
-        m.examples = vec![ModuleExample {
-            title: "lookup".into(),
-            description: None,
-            inputs: json!({"id": 1}),
-            output: json!({"name": "Ada"}),
+        m.examples = vec![{
+            let mut ex = ModuleExample::default();
+            ex.title = "lookup".into();
+            ex.inputs = json!({"id": 1});
+            ex.output = json!({"name": "Ada"});
+            ex
         }];
         let out = format_module(&m, ModuleStyle::Markdown, true);
         let s = out.as_str().unwrap();
