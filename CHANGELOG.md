@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-05-11
+
+### Added
+
+- **`format_csv(rows: &[Map<String, Value>], bom: bool) -> String`** and **`format_jsonl(rows: &[Map<String, Value>]) -> String`** — byte-equivalent tabular data formatters. Lives in `src/formatting/tabular.rs`; re-exported at the crate root. Cross-SDK byte-identity contract: Python / TypeScript / Rust SDKs emit identical bytes for the same input. Asserted via shared conformance corpus at `apcore-toolkit/conformance/fixtures/` (run by `cargo test --test tabular_conformance`).
+
+### Changed (potentially breaking for downstream consumers)
+
+- **`serde_json` `preserve_order` feature enabled** — required for canonical insertion-order key emission in `format_csv` / `format_jsonl`, matching Python `dict` and JS object key ordering. This is transitively enabled for ALL `serde_json::Map` instances in the dependency tree. Downstream code that relied on `serde_json::Map` iterating alphabetically (e.g. `apcore-cli-rust`'s pre-fix CSV test expectations) must update to handle insertion-order iteration. The crate's own `render_annotations_table` re-sorts explicitly to keep the `formatting.md` alphabetical contract.
+
+### CSV / JSONL canonical contract
+
+- **CSV**: header = union of keys across all rows in insertion-order. Non-scalar cells = `serde_json::to_string` (canonical compact JSON). RFC 4180 CRLF terminator. `,` / `"` / `\n` / `\r` quote-wrapped.
+- **JSONL**: canonical compact JSON per row, LF terminator, no trailing blank. Whole-number floats render as integers (matching JS `JSON.stringify`); NaN/Infinity collapse to `null`.
+
+### Why
+
+See `apcore-cli/docs/tech-design.md` ADR-09 for the tier-split rationale: csv/jsonl are byte-equivalent toolkit-delegated formats, table/tui are SDK-native presentation.
+
 
 ## [0.6.0] - 2026-05-07
 

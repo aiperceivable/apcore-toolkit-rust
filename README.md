@@ -43,6 +43,8 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `MagicBytesVerifier` | Verifies file headers match expected magic bytes |
 | `JSONVerifier` | Verifies JSON files parse correctly |
 | `to_markdown` | Converts JSON objects to Markdown with depth control and table heuristics |
+| `format_csv` _(v0.7.0)_ | Byte-equivalent RFC 4180 CSV emitter — header = union of keys; canonical JSON for nested cells; CRLF terminator |
+| `format_jsonl` _(v0.7.0)_ | Byte-equivalent JSON Lines emitter — canonical compact JSON per row, LF terminator |
 | `enrich_schema_descriptions` | Merges descriptions into JSON Schema properties |
 | `DisplayResolver` | Sparse binding.yaml overlay — resolves alias, description, guidance, tags into `metadata["display"]` |
 | `SyntaxVerifier` | Verifies Rust source files parse without syntax errors (via `syn`) |
@@ -187,6 +189,37 @@ let opts = MarkdownOptions {
 };
 let md = to_markdown(&data, &opts).unwrap();
 ```
+
+### Tabular Formats (v0.7.0)
+
+Byte-equivalent CSV / JSONL emitters with a cross-SDK conformance contract — Rust, Python, and TypeScript produce identical bytes for the same input.
+
+```rust
+use apcore_toolkit::{format_csv, format_jsonl};
+use serde_json::{json, Map, Value};
+
+let rows: Vec<Map<String, Value>> = vec![
+    json!({"sn": 1, "title": "First", "score": 78}).as_object().unwrap().clone(),
+    json!({"sn": 2, "title": "Second", "score": 82, "description": "later-only field"})
+        .as_object().unwrap().clone(),
+];
+
+// CSV: header = union of keys across all rows (no silent data loss on
+// heterogeneous rows); nested values serialized as canonical compact JSON;
+// RFC 4180 CRLF line terminator.
+print!("{}", format_csv(&rows, /*bom=*/ false));
+// sn,title,score,description\r\n1,First,78,\r\n2,Second,82,later-only field\r\n
+
+// JSONL: canonical compact JSON per row, LF terminator, no trailing blank.
+print!("{}", format_jsonl(&rows));
+
+// UTF-8 BOM for Excel locales (default off for pipeline consumers):
+print!("{}", format_csv(&rows, true));
+```
+
+> **Note** — this crate enables the `serde_json/preserve_order` feature, required for canonical insertion-order key emission. Transitively affects ALL `serde_json::Map` iteration in your dependency tree; downstream code that relied on alphabetical iteration must re-sort explicitly.
+
+See `apcore-toolkit/docs/features/formatting.md` § Tabular Formats for the full contract and `apcore-toolkit/conformance/fixtures/format_csv.json` / `format_jsonl.json` for the shared cross-SDK test corpus.
 
 ## Requirements
 

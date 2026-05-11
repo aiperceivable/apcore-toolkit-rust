@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
@@ -23,7 +23,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 apcore = "0.21"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is required for the toolkit's byte-equivalent tabular
+# formatters (csv / jsonl): object key order MUST match insertion order to
+# stay byte-identical with Python (dict order) and JavaScript (object key
+# order per ES2015+). Without this feature serde_json sorts keys alphabetically.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
 regex = "1"
 syn = { version = "2", features = ["parsing", "full"] }

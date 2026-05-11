@@ -469,8 +469,11 @@ fn render_annotations_table(annotations: Option<&ModuleAnnotations>) -> Option<S
     if entries.is_empty() {
         return None;
     }
-    // serde_json::Map iterates in alphabetical key order under default
-    // features, so `entries` is already sorted. We do not re-sort.
+    // The toolkit enables serde_json's `preserve_order` feature for byte-
+    // equivalent tabular formatters (csv / jsonl), so Map no longer iterates
+    // alphabetically. Re-sort entries here to keep the formatting.md contract:
+    // "Rows are sorted alphabetically by snake_case key".
+    entries.sort_by(|a, b| a.0.cmp(b.0));
     let mut rows = vec!["| Flag | Value |".to_string(), "|---|---|".to_string()];
     for (key, value) in entries {
         let rendered = match value {
