@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use apcore_toolkit::{
     extract_path_param_names, generate_suggested_alias, get_writer, has_path_params,
-    resolve_http_verb, substitute_path_params, OutputFormat, OutputFormatError, SCANNER_VERB_MAP,
+    resolve_http_verb, substitute_path_params, InvalidFormatError, OutputFormat, SCANNER_VERB_MAP,
     VERSION,
 };
 
@@ -48,12 +48,18 @@ fn extract_path_param_names_round_trip_with_substitute() {
 fn get_writer_returns_expected_variants_for_known_formats() {
     assert_eq!(get_writer("yaml").unwrap(), OutputFormat::Yaml);
     assert_eq!(get_writer("registry").unwrap(), OutputFormat::Registry);
-    assert_eq!(get_writer("YAML").unwrap(), OutputFormat::Yaml);
+}
+
+#[test]
+fn get_writer_canonical_formats_reject_mixed_case() {
+    // Mirrors Python and TypeScript SDKs — canonical formats are case-sensitive.
+    let err = get_writer("YAML").unwrap_err();
+    assert!(matches!(err, InvalidFormatError::Unknown(_)));
 }
 
 #[test]
 fn get_writer_returns_error_for_unknown_format() {
     let err = get_writer("xml").unwrap_err();
-    assert!(matches!(err, OutputFormatError::Unknown(_)));
+    assert!(matches!(err, InvalidFormatError::Unknown(_)));
     assert!(err.to_string().contains("xml"));
 }

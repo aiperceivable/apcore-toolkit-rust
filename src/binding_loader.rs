@@ -42,10 +42,6 @@ const MAX_BINDING_FILE_SIZE: u64 = 16 * 1024 * 1024;
 /// consumption in `load_data` callers that accumulate results.
 const MAX_BINDING_FILES_PER_DIR: usize = 10_000;
 
-// TODO(release-gate): deep-chain parity with Python/TypeScript BindingLoader — manual
-// cross-SDK review required before tagging 0.5.0. D11 audit was inconclusive due to
-// sub-agent file access limits. BindingLoader is the flagship 0.5.0 cross-SDK feature.
-
 /// Errors produced by [`BindingLoader`].
 #[derive(Debug, Error)]
 pub enum BindingLoadError {
@@ -151,7 +147,7 @@ impl BindingLoader {
                 // caller switching `recursive=false` → `true` gets a
                 // consistent error contract.
                 let mut flat: Vec<PathBuf> = Vec::new();
-                for entry_result in WalkDir::new(path) {
+                for entry_result in WalkDir::new(path).max_depth(64).follow_links(false) {
                     let entry = entry_result.map_err(|e| {
                         let io_err = e
                             .into_io_error()

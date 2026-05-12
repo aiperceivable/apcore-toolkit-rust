@@ -83,12 +83,12 @@ pub use output::verifiers::{
     YAMLVerifier,
 };
 pub use output::yaml_writer::YAMLWriter;
-pub use output::{get_writer, OutputFormat, OutputFormatError};
+pub use output::{get_writer, InvalidFormatError, OutputFormat};
 pub use resolve_target::{resolve_target, ResolveTargetError, ResolvedTarget};
 pub use scanner::{deduplicate_ids, filter_modules, infer_annotations_from_method, BaseScanner};
 pub use schema_utils::enrich_schema_descriptions;
 pub use serializers::{annotations_to_dict, module_to_dict, modules_to_dicts};
-pub use types::ScannedModule;
+pub use types::{clone_module, create_scanned_module, ScannedModule};
 
 #[cfg(feature = "http-proxy")]
 pub use output::http_proxy_writer::{HTTPProxyRegistryWriter, HTTPProxyRegistryWriterError};

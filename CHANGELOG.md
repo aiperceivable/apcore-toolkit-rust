@@ -2,7 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.7.0] - 2026-05-11
+
+## [0.7.0] - 2026-05-12
+
+### Fixed (post-audit cross-SDK reconciliation)
+
+- **`RegistryWriter::target_allowed` — boundary-aware module-path matching (SECURITY).** Previously used a bare `target.starts_with(prefix)` check, which accepted `target="myappx.evil:fn"` when `allowed_prefixes=["myapp"]`. Python and TypeScript SDKs already rejected this. Now splits `target` on `:` first and applies a boundary-aware match equivalent to Python's `_module_path_matches_prefix`. The existing `test_allowed_prefixes_rejects_non_matching_target` was updated to use module-path-only prefixes (`"app"` instead of `"app:"`), and a new `test_target_allowed_boundary_aware` covers the boundary cases. (D11-002)
+- **`BindingLoader::load` — recursion-depth cap and symlink-loop guard.** `WalkDir::new(path)` now uses `.max_depth(64).follow_links(false)` to bound pathological depths and prevent symlink-cycle stack overflows. Matches the existing 64-deep cap in the TypeScript SDK. (D11-006)
+
+### Added
+
+- **`create_scanned_module` and `clone_module` free functions** at the crate root — tri-language parity helpers mirroring `apcore_toolkit.create_scanned_module` (Python) and `createScannedModule` / `cloneModule` (TypeScript). Rust callers may still equivalently use `ScannedModule::new(...)` and `module.clone()`. (D1-W2)
+- **`tests/display_resolve_conformance.rs`** — new conformance test wired to the shared fixture `apcore-toolkit/conformance/fixtures/display_resolve.json` (14 cases). Previously orphaned across all three SDKs. (D9-W1)
+
+### Removed
+
+- Dropped unused `tokio-test = "0.4"` dev-dependency from `Cargo.toml`. The crate has no async test that uses it. (D6-W1)
+
+
+### Fixed
+
+- **`infer_annotations_from_method` HEAD/OPTIONS canonical mapping** (refs aiperceivable/apcore-toolkit#11) — added explicit `HEAD | OPTIONS => readonly=true` arms in `BaseScanner::infer_annotations_from_method`, aligning with the canonical RFC 9110 mapping in `apcore-toolkit/docs/features/scanning.md` and matching the Python and TypeScript implementations. Previously Rust silently returned default (all-false) annotations for these methods. The prior 0.6.0 CHANGELOG entry asserting Rust was already aligned was incorrect and has been corrected.
+- **`AIEnhancer` annotation prompt template** — replaced the hardcoded `ANNOTATION_FIELDS` constant (which contained phantom fields like `tags`, `version`, `category`, `requires_confirmation`, `long_running` that do not exist on `ModuleAnnotations`, and omitted real fields like `requires_approval`, `open_world`, `streaming`, `cache_ttl`, `cache_key_fields`, `paginated`, `pagination_style`) with a runtime helper (`annotation_field_names`) that derives the field list from `ModuleAnnotations::default()` via serde reflection. New fields added upstream are now picked up automatically. Matches the dynamic-template approach already used by the Python and TypeScript SDKs.
+- **`AIEnhancer::new` endpoint validation** — endpoint URLs are now rejected at construction time if the scheme is not `http` or `https` (e.g. `file://`, `ftp://`). Previously Rust failed late inside `call_llm` with an unhelpful connection error; Python and TypeScript already validated at construction. Returns `AIEnhancerError::Config`.
+- **`YAMLWriter` symlink overwrite protection** — added pre-write and post-rename `symlink_metadata` checks against the target path. If a symlink occupies the target file path, the writer now refuses to overwrite it and records a `WriteResult` with `verified=false` and `verification_error="Security skip: symlink at target path"`. Mitigates a path-traversal vector where an attacker plants a symlink in the output directory before the writer runs. Matches Python's `is_symlink()` guard and TypeScript's `lstatSync` guard.
+- **`README.md` `BindingLoadError` variant list** — corrected the Core Modules table row, which previously listed only 5 of the 7 enum variants (now includes `FileTooLarge` and `TooManyFiles`, added in 0.5.0 as Rust-only safety caps).
+- **`CHANGELOG.md` 0.3.0 serializer naming** — the 0.3.0 entry mentioned `annotations_to_value() / module_to_value() / modules_to_values()`; the actual exported names are `annotations_to_dict / module_to_dict / modules_to_dicts`. Rewritten to use the correct `_dict` suffix.
 
 ### Added
 
@@ -21,6 +46,21 @@ All notable changes to this project will be documented in this file.
 
 See `apcore-cli/docs/tech-design.md` ADR-09 for the tier-split rationale: csv/jsonl are byte-equivalent toolkit-delegated formats, table/tui are SDK-native presentation.
 
+### Changed (BREAKING — post-audit cross-SDK reconciliation)
+
+The 2026-05-12 cross-SDK audit (`/apcore-skills:audit --scope toolkit`) flagged contract-parity divergences between Rust and the Python / TypeScript SDKs. The following Rust-side adjustments bring behaviour in line with the spec and the other two SDKs.
+
+- **`OutputFormatError` renamed to `InvalidFormatError`** (D1-001) — the public error type returned by `get_writer` is now `apcore_toolkit::InvalidFormatError`, mirroring `apcore-toolkit-python`'s `InvalidFormatError` and `apcore-toolkit-typescript`'s `InvalidFormatError` for cross-SDK symbol parity. The `Unknown(String)` variant and `Display` message (`"Unknown output format: {0}"`) are unchanged. **Migration:** replace `use apcore_toolkit::OutputFormatError;` with `use apcore_toolkit::InvalidFormatError;` and any `match err { OutputFormatError::Unknown(_) => ... }` with `match err { InvalidFormatError::Unknown(_) => ... }`. The integration test `tests/public_api_integration.rs` was updated as the canonical migration example.
+- **`get_writer` canonical formats now case-sensitive** (D10-002) — `get_writer("YAML")`, `get_writer("Yaml")`, `get_writer("Registry")`, `get_writer("REGISTRY")` etc. now return `Err(InvalidFormatError::Unknown(...))` instead of matching. Mirrors the case-sensitive matching already enforced by `apcore-toolkit-python` and `apcore-toolkit-typescript`. The HTTP-proxy alias set (`"http_proxy"`, `"http-proxy"`, `"httpproxy"`) keeps its case-insensitive matching as documented in `apcore-toolkit/docs/features/output-writers.md`. **Migration:** lowercase the input before calling — e.g. replace `get_writer("YAML")` with `get_writer("yaml")`. Spec: `apcore-toolkit/docs/features/output-writers.md` § Contract: get_writer.
+
+### Fixed
+
+- **Stale `TODO(release-gate)` comments removed** (D9-001) — two TODOs in `src/binding_loader.rs` and `src/output/registry_writer.rs` referencing the v0.5.0 release-gate audit were left in place after v0.5.0 / v0.6.0 / v0.7.0 had all shipped. The audits they referenced have since been completed; the stale text was misleading readers about what is still pending. Removed.
+
+### Test suite
+
+- 456 tests pass (was 455); +1 regression test `get_writer_canonical_formats_reject_mixed_case` in `tests/public_api_integration.rs` covering the new D10-002 case-sensitivity contract. Existing inline test `test_get_writer_case_insensitive` was renamed to `test_get_writer_canonical_formats_are_case_sensitive` and inverted to assert `is_err()` for mixed-case canonical input.
+
 
 ## [0.6.0] - 2026-05-07
 
@@ -36,7 +76,7 @@ See `apcore-cli/docs/tech-design.md` ADR-09 for the tier-split rationale: csv/js
 
 ### Changed
 
-- **`infer_annotations_from_method` HEAD/OPTIONS canonical mapping** (refs aiperceivable/apcore-toolkit#11) — already produced `readonly=true` for `HEAD` and `OPTIONS` (without `cacheable=true`), aligned with the canonical mapping declared in `apcore-toolkit/docs/features/scanning.md` and now also matched by Python and TypeScript. No code change needed in this SDK; an extra smoke test in `formatting::surface::tests::scanner_head_options_canonical_mapping` cross-references the new spec section.
+- **`infer_annotations_from_method` HEAD/OPTIONS canonical mapping** (refs aiperceivable/apcore-toolkit#11) — the prior 0.6.0 entry incorrectly asserted Rust was already aligned. In fact, `BaseScanner::infer_annotations_from_method` was silently falling through to the catch-all default (all-false) for `HEAD` and `OPTIONS`, contradicting the canonical RFC 9110 mapping in `apcore-toolkit/docs/features/scanning.md` as well as the Python and TypeScript implementations (both of which return `readonly=true`). The cross-language audit caught this in the next consistency sweep. See the 0.7.1 entry for the actual fix.
 
 ## [0.5.0] - 2026-04-21
 
@@ -59,7 +99,7 @@ Aligned release across Python, TypeScript, and Rust. Tracks apcore 0.19.0 featur
 ### Changed
 
 - **`output::yaml_writer::build_binding`** — emits top-level `display:` key only when `module.display.is_some()`. Refactored from `serde_json::json!` macro to `serde_json::Map` construction to support conditional keys.
-- **`serializers::module_to_value`** — includes `display` key.
+- **`serializers::module_to_dict`** — includes `display` key.
 - **`test_field_count`** updated from 13 → 14 to reflect the new field.
 - **`output::registry_writer` & `output::http_proxy_writer`** — `ModuleDescriptor` construction updated for apcore 0.19.0 breaking changes: `display: Option<serde_json::Value>` now required; `annotations` is now `Option<ModuleAnnotations>`; `http_proxy_writer` now populates all descriptor fields (previously partial, missed `description`/`documentation`/`version`/`examples`/`metadata`).
 
@@ -150,7 +190,7 @@ Initial release. Rust port of [apcore-toolkit-python](https://github.com/aiperce
     schemas (`allOf`/`anyOf`/`oneOf`, `items`, `properties`), depth-limited to 16
 - `enrich_schema_descriptions()` — merges parameter descriptions into JSON Schema
   properties with optional overwrite mode
-- `annotations_to_value()` / `module_to_value()` / `modules_to_values()` —
+- `annotations_to_dict()` / `module_to_dict()` / `modules_to_dicts()` —
   serialization utilities with `tracing::warn!` on serialization failures
 - `to_markdown()` — generic JSON-to-Markdown conversion with depth control,
   table heuristics, field/exclude filtering, and UTF-8 safe truncation

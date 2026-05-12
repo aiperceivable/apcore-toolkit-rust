@@ -920,16 +920,19 @@ mod tests {
         assert!(out.as_str().unwrap().contains("## (untagged)"));
     }
 
-    // ---------- HEAD/OPTIONS canonical mapping (D10-001: all-false defaults) ----------
+    // ---------- HEAD/OPTIONS canonical mapping (RFC 9110: readonly without cacheable) ----------
 
     #[test]
     fn scanner_head_options_canonical_mapping() {
         use crate::scanner::infer_annotations_from_method;
         let head = infer_annotations_from_method("HEAD");
         let options = infer_annotations_from_method("OPTIONS");
-        assert!(!head.readonly);
+        // HEAD and OPTIONS are readonly per RFC 9110, but not cacheable by default —
+        // matching Python and TypeScript implementations and the canonical mapping
+        // in apcore-toolkit/docs/features/scanning.md.
+        assert!(head.readonly);
         assert!(!head.cacheable);
-        assert!(!options.readonly);
+        assert!(options.readonly);
         assert!(!options.cacheable);
     }
 }

@@ -89,6 +89,34 @@ impl ScannedModule {
     }
 }
 
+/// Tri-language parity helper — mirrors `apcore_toolkit.create_scanned_module`
+/// (Python) and `createScannedModule` (TypeScript). Rust callers may
+/// equivalently use [`ScannedModule::new`] or struct-literal construction.
+pub fn create_scanned_module(
+    module_id: String,
+    description: String,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    tags: Vec<String>,
+    target: String,
+) -> ScannedModule {
+    ScannedModule::new(
+        module_id,
+        description,
+        input_schema,
+        output_schema,
+        tags,
+        target,
+    )
+}
+
+/// Tri-language parity helper — mirrors `apcore_toolkit.clone_module`
+/// (Python) and `cloneModule` (TypeScript). Rust callers may equivalently
+/// use `module.clone()` (the type derives `Clone`).
+pub fn clone_module(module: &ScannedModule) -> ScannedModule {
+    module.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

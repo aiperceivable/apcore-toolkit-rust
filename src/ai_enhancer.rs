@@ -23,22 +23,29 @@ const DEFAULT_THRESHOLD: f64 = 0.7;
 const DEFAULT_BATCH_SIZE: usize = 5;
 const DEFAULT_TIMEOUT: u64 = 30;
 
-/// All annotation fields that the SLM may assign confidence scores for.
+/// Derive the list of annotation field names the SLM may assign confidence
+/// scores for by serializing a default `ModuleAnnotations` and inspecting
+/// its object keys.
 ///
-/// Keep in sync with `apcore::module::ModuleAnnotations` when upstream adds fields.
-const ANNOTATION_FIELDS: &[&str] = &[
-    "description",
-    "documentation",
-    "tags",
-    "version",
-    "cacheable",
-    "readonly",
-    "destructive",
-    "idempotent",
-    "requires_confirmation",
-    "long_running",
-    "category",
-];
+/// This mirrors the dynamic-template approach used by the Python SDK
+/// (`dataclasses.fields(ModuleAnnotations)`) and the TypeScript SDK
+/// (`Object.entries(DEFAULT_ANNOTATIONS)`). Using runtime reflection keeps
+/// the SLM prompt template automatically in sync when upstream
+/// `apcore::module::ModuleAnnotations` gains or loses fields, eliminating
+/// the drift risk of a hardcoded list.
+///
+/// The `extra` open-extension map is excluded (matches TS behavior at
+/// `apcore-toolkit-typescript/src/ai-enhancer.ts`).
+fn annotation_field_names() -> Vec<String> {
+    match serde_json::to_value(ModuleAnnotations::default()) {
+        Ok(Value::Object(map)) => map
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k != "extra")
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 /// Errors returned by [`AIEnhancer`] operations.
 #[derive(Debug, Error)]
@@ -119,6 +126,7 @@ impl AIEnhancer {
         let endpoint = endpoint.unwrap_or_else(|| {
             env::var("APCORE_AI_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.into())
         });
+        validate_endpoint_scheme(&endpoint)?;
         let model = model.unwrap_or_else(|| {
             env::var("APCORE_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into())
         });
@@ -251,9 +259,9 @@ impl AIEnhancer {
             }
         }
 
-        let confidence_keys: serde_json::Value = ANNOTATION_FIELDS
-            .iter()
-            .map(|&field| (field.to_string(), serde_json::json!(0.0)))
+        let confidence_keys: serde_json::Value = annotation_field_names()
+            .into_iter()
+            .map(|field| (field, serde_json::json!(0.0)))
             .collect::<serde_json::Map<_, _>>()
             .into();
         let confidence_str =
@@ -582,6 +590,39 @@ fn set_bool_annotation(ann: &mut ModuleAnnotations, field: &str, value: bool) ->
             false
         }
     }
+}
+
+/// Validate that an endpoint URL uses an HTTP(S) scheme.
+///
+/// Matches the construction-time scheme validation performed by the Python
+/// and TypeScript SDKs (see `apcore-toolkit-python/src/apcore_toolkit/ai_enhancer.py`
+/// and `apcore-toolkit-typescript/src/ai-enhancer.ts`). Rejecting non-HTTP
+/// schemes (e.g. `file://`, `ftp://`) at construction prevents misleading
+/// connection errors later inside `call_llm` and removes a small but real
+/// SSRF-adjacent surface.
+fn validate_endpoint_scheme(endpoint: &str) -> Result<(), AIEnhancerError> {
+    // Manual parsing: we cannot rely on the `url` crate because it would
+    // add a transitive dependency when the optional `http-proxy` feature
+    // is disabled. The check is intentionally simple — extract the part
+    // before "://" and compare case-insensitively against the allowed set.
+    let Some(scheme_end) = endpoint.find("://") else {
+        return Err(AIEnhancerError::Config(format!(
+            "Invalid endpoint URL (missing scheme): {endpoint}"
+        )));
+    };
+    let scheme = &endpoint[..scheme_end];
+    if scheme.is_empty() {
+        return Err(AIEnhancerError::Config(format!(
+            "Invalid endpoint URL (empty scheme): {endpoint}"
+        )));
+    }
+    let scheme_lower = scheme.to_ascii_lowercase();
+    if scheme_lower != "http" && scheme_lower != "https" {
+        return Err(AIEnhancerError::Config(format!(
+            "Invalid endpoint URL scheme: {scheme}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_float_env(name: &str, default: f64) -> f64 {
@@ -1010,5 +1051,81 @@ mod tests {
     fn test_strip_ansi_mixed_content() {
         let input = "normal \x1b[1mbold\x1b[0m text";
         assert_eq!(strip_ansi(input), "normal bold text");
+    }
+
+    // ---- Endpoint scheme validation (A-D-003 parity with Python/TS) ----
+
+    #[test]
+    fn test_ai_enhancer_rejects_file_scheme() {
+        let result = AIEnhancer::new(Some("file:///etc/passwd".into()), None, None, None, None);
+        assert!(result.is_err(), "file:// scheme must be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid endpoint URL scheme"),
+            "error should call out invalid scheme, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_ai_enhancer_rejects_ftp_scheme() {
+        let result = AIEnhancer::new(Some("ftp://example.com".into()), None, None, None, None);
+        assert!(result.is_err(), "ftp:// scheme must be rejected");
+    }
+
+    #[test]
+    fn test_ai_enhancer_rejects_missing_scheme() {
+        let result = AIEnhancer::new(Some("localhost:11434".into()), None, None, None, None);
+        assert!(result.is_err(), "URL without scheme must be rejected");
+    }
+
+    #[test]
+    fn test_ai_enhancer_accepts_http_scheme() {
+        let result = AIEnhancer::new(
+            Some("http://localhost:11434/v1".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "http:// must be accepted");
+    }
+
+    #[test]
+    fn test_ai_enhancer_accepts_https_scheme() {
+        let result = AIEnhancer::new(
+            Some("https://api.example.com/v1".into()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "https:// must be accepted");
+    }
+
+    // ---- Dynamic annotation field discovery (A-D-002 parity with Python/TS) ----
+
+    #[test]
+    fn test_annotation_field_names_match_struct() {
+        let names = annotation_field_names();
+        // Must include real ModuleAnnotations fields.
+        assert!(names.iter().any(|n| n == "readonly"));
+        assert!(names.iter().any(|n| n == "destructive"));
+        assert!(names.iter().any(|n| n == "idempotent"));
+        assert!(names.iter().any(|n| n == "cacheable"));
+        assert!(names.iter().any(|n| n == "cache_ttl"));
+        assert!(names.iter().any(|n| n == "paginated"));
+        // Must NOT include phantom fields from the stale const list.
+        assert!(!names.iter().any(|n| n == "tags"));
+        assert!(!names.iter().any(|n| n == "version"));
+        assert!(!names.iter().any(|n| n == "category"));
+        assert!(!names.iter().any(|n| n == "requires_confirmation"));
+        assert!(!names.iter().any(|n| n == "long_running"));
+        // Must NOT include the open-extension map key.
+        assert!(!names.iter().any(|n| n == "extra"));
+        // No duplicates.
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "field names must be unique");
     }
 }

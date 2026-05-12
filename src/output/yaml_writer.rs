@@ -92,6 +92,24 @@ impl YAMLWriter {
 
             let file_path = output_path.join(&final_filename);
 
+            // Pre-write symlink check (TOCTOU mitigation — matches the Python
+            // (`is_symlink`) and TypeScript (`lstatSync`) writers). A symlink at
+            // the target path could redirect the atomic rename to an attacker-
+            // controlled location outside `output_path`, even though the parent
+            // directory passed canonicalization. Refuse to overwrite a symlink
+            // and record the result as unverified, matching Python/TS wording.
+            if let Ok(meta) = file_path.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    warn!(file_path = %file_path.display(), "Skipping symlink escape at target path");
+                    results.push(WriteResult::failed(
+                        module.module_id.clone(),
+                        Some(file_path.display().to_string()),
+                        "Security skip: symlink at target path".into(),
+                    ));
+                    continue;
+                }
+            }
+
             if file_path.exists() {
                 warn!(file_path = %file_path.display(), "Overwriting existing file");
             }
@@ -126,6 +144,16 @@ impl YAMLWriter {
             if let Err(e) = fs::rename(&tmp_path, &file_path) {
                 let _ = fs::remove_file(&tmp_path);
                 return Err(WriteError::io(file_path.display().to_string(), e));
+            }
+            // Post-rename defence-in-depth: warn if the result is a symlink
+            // (would indicate a TOCTOU race). Matches Python/TS writers.
+            if let Ok(meta) = file_path.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    warn!(
+                        file_path = %file_path.display(),
+                        "YAMLWriter: post-rename symlink detected — possible race"
+                    );
+                }
             }
             #[cfg(unix)]
             {
@@ -645,6 +673,47 @@ mod tests {
         assert_ne!(path1, path2, "collision must produce distinct file paths");
         assert!(Path::new(path1).exists(), "first file must exist: {path1}");
         assert!(Path::new(path2).exists(), "second file must exist: {path2}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refuses_to_overwrite_symlink_at_target_path() {
+        // A-D-015 parity: when a symlink occupies the target file path, the
+        // writer must refuse to overwrite it (matches Python's is_symlink and
+        // TypeScript's lstatSync guards). The result must be marked unverified
+        // with the canonical "Security skip" wording.
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let writer = YAMLWriter;
+        let module = sample_module(); // module_id = "users.get_user"
+
+        // Plant a symlink at the target file path BEFORE writing. The symlink
+        // points to a sibling decoy file so we can verify the writer did not
+        // dereference it.
+        let target_file = dir.path().join("users.get_user.binding.yaml");
+        let decoy = dir.path().join("decoy.yaml");
+        fs::write(&decoy, "original decoy content\n").unwrap();
+        symlink(&decoy, &target_file).unwrap();
+
+        let results = writer
+            .write(&[module], dir.path().to_str().unwrap(), false, false, None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            !results[0].verified,
+            "symlinked target must NOT be verified"
+        );
+        let err = results[0].verification_error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("symlink"),
+            "verification_error should mention symlink, got: {err}"
+        );
+
+        // The decoy file behind the symlink must be untouched.
+        let decoy_content = fs::read_to_string(&decoy).unwrap();
+        assert_eq!(decoy_content, "original decoy content\n");
     }
 
     #[test]

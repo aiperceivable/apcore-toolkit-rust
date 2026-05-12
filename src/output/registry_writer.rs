@@ -20,11 +20,6 @@ use crate::output::types::{Verifier, WriteResult};
 use crate::output::verifiers::{run_verifier_chain, RegistryVerifier};
 use crate::types::ScannedModule;
 
-// TODO(release-gate): deep-chain parity with Python/TypeScript RegistryWriter — manual
-// review required. RegistryWriter is the primary candidate for missing-registration bugs
-// (audit D11 was inconclusive). Verify that all three SDKs perform equivalent registry
-// mutations and handle the same error paths before tagging 0.5.0.
-
 /// Async handler function type for registered modules.
 pub type HandlerFn = Arc<
     dyn for<'a> Fn(
@@ -136,12 +131,42 @@ impl RegistryWriter {
 
     /// Returns `true` when the module target is permitted by the configured
     /// `allowed_prefixes` (or when no allow-list is configured).
+    ///
+    /// Performs boundary-aware module-path matching: the module path component
+    /// of `target` (everything before the `:` separator) must equal the prefix
+    /// or be a dotted descendant of it. Mirrors Python's
+    /// `_module_path_matches_prefix` — `"myapp"` does NOT permit `"myappx"`.
     fn target_allowed(&self, target: &str) -> bool {
         match self.allowed_prefixes.as_ref() {
             None => true,
-            Some(prefixes) => prefixes.iter().any(|p| target.starts_with(p.as_str())),
+            Some(prefixes) => {
+                let module_path = target.split(':').next().unwrap_or(target);
+                prefixes
+                    .iter()
+                    .any(|p| module_path_matches_prefix(module_path, p))
+            }
         }
     }
+}
+
+/// Boundary-aware module-path prefix match.
+///
+/// Returns `true` when `module_path` is exactly `prefix` or a dotted
+/// descendant of it. A trailing dot on `prefix` is tolerated; an empty
+/// prefix never matches. Mirrors the Python `_module_path_matches_prefix`
+/// helper in `apcore-toolkit-python/src/apcore_toolkit/resolve_target.py`.
+fn module_path_matches_prefix(module_path: &str, prefix: &str) -> bool {
+    let normalized = prefix.trim_end_matches('.');
+    if normalized.is_empty() {
+        return false;
+    }
+    if module_path == normalized {
+        return true;
+    }
+    let mut boundary = String::with_capacity(normalized.len() + 1);
+    boundary.push_str(normalized);
+    boundary.push('.');
+    module_path.starts_with(&boundary)
 }
 
 impl RegistryWriter {
@@ -451,8 +476,11 @@ mod tests {
     // must be rejected with a failed WriteResult and never registered.
     #[test]
     fn test_allowed_prefixes_rejects_non_matching_target() {
+        // Use module-path-only prefixes (no trailing colon) — matches the
+        // canonical Python/TypeScript behavior where prefixes are dotted
+        // module paths, not target strings with the `:callable` suffix.
         let writer =
-            RegistryWriter::new().with_allowed_prefixes(vec!["app:".into(), "myapp:".into()]);
+            RegistryWriter::new().with_allowed_prefixes(vec!["app".into(), "myapp".into()]);
         let mut registry = Registry::new();
         let allowed = sample_module(); // target = "app:get_user"
         let denied = ScannedModule::new(
@@ -476,6 +504,38 @@ mod tests {
             err.contains("allowed_prefixes"),
             "rejection message should mention allowed_prefixes: got {err:?}"
         );
+    }
+
+    // D11-002 regression: boundary-aware module-path matching. Prefix `"myapp"`
+    // must reject `"myappx.evil:fn"` (peer SDKs already reject; Rust used to
+    // accept due to bare `starts_with`). Mirrors Python's
+    // `_module_path_matches_prefix`.
+    #[test]
+    fn test_target_allowed_boundary_aware() {
+        let writer = RegistryWriter::new().with_allowed_prefixes(vec!["myapp".into()]);
+        // Exact match
+        assert!(writer.target_allowed("myapp:fn"));
+        // Dotted descendant
+        assert!(writer.target_allowed("myapp.foo:fn"));
+        assert!(writer.target_allowed("myapp.foo.bar:fn"));
+        // Non-match: same character prefix without dotted boundary
+        assert!(!writer.target_allowed("myappx.evil:fn"));
+        assert!(!writer.target_allowed("myappx:fn"));
+        // Unrelated module path
+        assert!(!writer.target_allowed("other:fn"));
+
+        // Nested prefix
+        let writer2 = RegistryWriter::new().with_allowed_prefixes(vec!["myapp.foo".into()]);
+        assert!(writer2.target_allowed("myapp.foo:fn"));
+        assert!(writer2.target_allowed("myapp.foo.bar:fn"));
+        assert!(!writer2.target_allowed("myapp.foobar:fn"));
+        assert!(!writer2.target_allowed("myapp:fn"));
+
+        // Trailing-dot tolerance and empty-prefix rejection
+        let writer3 = RegistryWriter::new().with_allowed_prefixes(vec!["myapp.".into()]);
+        assert!(writer3.target_allowed("myapp:fn"));
+        let writer4 = RegistryWriter::new().with_allowed_prefixes(vec!["".into()]);
+        assert!(!writer4.target_allowed("anything:fn"));
     }
 
     #[test]

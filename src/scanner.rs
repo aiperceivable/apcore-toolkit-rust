@@ -156,21 +156,25 @@ pub fn deduplicate_ids(modules: Vec<ScannedModule>) -> Vec<ScannedModule> {
 
 /// Infer behavioral annotations from an HTTP method.
 ///
-/// Mapping:
-/// - GET    -> readonly=true, cacheable=true
-/// - DELETE -> destructive=true
-/// - PUT    -> idempotent=true
-/// - POST   -> default (all false; creates resources, not idempotent by spec)
-/// - PATCH  -> default (partial update, not standardly idempotent)
-/// - HEAD / OPTIONS / unknown -> default (all false)
-///
-/// Note: HEAD and OPTIONS intentionally return all-false defaults to match
-/// the Python and TypeScript implementations. They do NOT receive readonly=true.
+/// Canonical RFC 9110 mapping (aligned with Python and TypeScript SDKs and
+/// the spec at apcore-toolkit/docs/features/scanning.md):
+/// - GET            -> readonly=true, cacheable=true
+/// - HEAD           -> readonly=true (no cacheable)
+/// - OPTIONS        -> readonly=true (no cacheable)
+/// - DELETE         -> destructive=true
+/// - PUT            -> idempotent=true
+/// - POST           -> default (all false; creates resources, not idempotent by spec)
+/// - PATCH          -> default (partial update, not standardly idempotent)
+/// - unknown method -> default (all false)
 pub fn infer_annotations_from_method(method: &str) -> ModuleAnnotations {
     match method.to_uppercase().as_str() {
         "GET" => ModuleAnnotations {
             readonly: true,
             cacheable: true,
+            ..Default::default()
+        },
+        "HEAD" | "OPTIONS" => ModuleAnnotations {
+            readonly: true,
             ..Default::default()
         },
         "DELETE" => ModuleAnnotations {
@@ -406,28 +410,24 @@ mod tests {
 
     #[test]
     fn test_infer_annotations_head() {
-        // Regression test (D10-001): HEAD must return all-false defaults,
-        // matching Python and TypeScript behavior. Previously returned readonly=true.
+        // Canonical RFC 9110 mapping: HEAD must return readonly=true (without
+        // cacheable=true), matching Python and TypeScript implementations and
+        // the spec in apcore-toolkit/docs/features/scanning.md.
         let ann = infer_annotations_from_method("HEAD");
-        assert!(
-            !ann.readonly,
-            "HEAD should NOT be readonly (matches Python/TS)"
-        );
-        assert!(!ann.cacheable);
+        assert!(ann.readonly, "HEAD must be readonly (matches Python/TS)");
+        assert!(!ann.cacheable, "HEAD must NOT be cacheable");
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
     }
 
     #[test]
     fn test_infer_annotations_options() {
-        // Regression test (D10-001): OPTIONS must return all-false defaults,
-        // matching Python and TypeScript behavior. Previously returned readonly=true.
+        // Canonical RFC 9110 mapping: OPTIONS must return readonly=true (without
+        // cacheable=true), matching Python and TypeScript implementations and
+        // the spec in apcore-toolkit/docs/features/scanning.md.
         let ann = infer_annotations_from_method("OPTIONS");
-        assert!(
-            !ann.readonly,
-            "OPTIONS should NOT be readonly (matches Python/TS)"
-        );
-        assert!(!ann.cacheable);
+        assert!(ann.readonly, "OPTIONS must be readonly (matches Python/TS)");
+        assert!(!ann.cacheable, "OPTIONS must NOT be cacheable");
         assert!(!ann.destructive);
         assert!(!ann.idempotent);
     }
@@ -436,9 +436,10 @@ mod tests {
     fn test_infer_annotations_head_case_insensitive() {
         let ann = infer_annotations_from_method("head");
         assert!(
-            !ann.readonly,
-            "HEAD (lowercase) should also return all-false defaults"
+            ann.readonly,
+            "HEAD (lowercase) should also return readonly=true"
         );
+        assert!(!ann.cacheable);
     }
 
     #[test]
