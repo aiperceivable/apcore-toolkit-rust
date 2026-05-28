@@ -209,14 +209,13 @@ pub fn extract_input_schema(operation: &Value, openapi_doc: Option<&Value>) -> V
     let body_content = operation
         .get("requestBody")
         .and_then(|rb| rb.get("content"));
-    let body_schema_opt = body_content
-        .and_then(|c| c.get("application/json"))
-        .and_then(|jc| jc.get("schema"))
-        .or_else(|| {
-            body_content
-                .and_then(|c| c.get("application/vnd.api+json"))
-                .and_then(|jc| jc.get("schema"))
-        });
+    let body_schema_opt = body_content.and_then(|c| c.as_object()).and_then(|m| {
+        m.iter()
+            .find(|(k, _)| {
+                k.starts_with("application/json") || k.as_str() == "application/vnd.api+json"
+            })
+            .and_then(|(_, v)| v.get("schema"))
+    });
     if let Some(body_schema) = body_schema_opt {
         let resolved = resolve_schema(body_schema, openapi_doc);
         if let Some(props) = resolved.get("properties").and_then(|p| p.as_object()) {
@@ -290,9 +289,14 @@ pub fn extract_output_schema(operation: &Value, openapi_doc: Option<&Value>) -> 
         let json_content = responses
             .get(*status_code)
             .and_then(|r| r.get("content"))
-            .and_then(|c| {
-                c.get("application/json")
-                    .or_else(|| c.get("application/vnd.api+json"))
+            .and_then(|c| c.as_object())
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| {
+                        k.starts_with("application/json")
+                            || k.as_str() == "application/vnd.api+json"
+                    })
+                    .map(|(_, v)| v)
             });
         if let Some(schema) = json_content.and_then(|jc| jc.get("schema")) {
             let mut resolved = resolve_schema(schema, openapi_doc);
@@ -1236,6 +1240,59 @@ mod tests {
         assert_eq!(
             result["type"], "string",
             "16-level deep $ref chain should be fully resolved; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_extract_input_schema_json_with_charset_param() {
+        // Issue 5: prefix matching — "application/json; charset=utf-8" must be
+        // treated as application/json for schema extraction.
+        let op = json!({
+            "requestBody": {
+                "content": {
+                    "application/json; charset=utf-8": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"]
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_input_schema(&op, None);
+        assert!(
+            result["properties"]["name"].is_object(),
+            "application/json; charset=utf-8 input schema should be extracted; got: {result:?}"
+        );
+        let req = result["required"].as_array().unwrap();
+        assert!(
+            req.contains(&serde_json::Value::String("name".into())),
+            "required field from charset-parameterized content-type should be present"
+        );
+    }
+
+    #[test]
+    fn test_extract_output_schema_json_with_charset_param() {
+        // Issue 5: prefix matching in extract_output_schema.
+        let op = json!({
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json; charset=utf-8": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"result": {"type": "boolean"}}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = extract_output_schema(&op, None);
+        assert!(
+            result["properties"]["result"].is_object(),
+            "application/json; charset=utf-8 output schema should be extracted; got: {result:?}"
         );
     }
 }

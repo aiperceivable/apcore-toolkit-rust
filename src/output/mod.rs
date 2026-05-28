@@ -4,6 +4,7 @@
 
 pub mod errors;
 pub mod registry_writer;
+pub mod rust_writer;
 pub mod types;
 pub mod verifiers;
 pub mod yaml_writer;

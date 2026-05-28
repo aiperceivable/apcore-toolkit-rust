@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.8.0] - 2026-05-28
+
+Aligned release across Python, TypeScript, and Rust. Bumps the required apcore runtime to 0.22.0.
+
+### Changed
+
+- Required runtime bumped to `apcore = "0.22"` (caret: `>=0.22.0, <0.23.0`) — the prior `"0.21"` caret constraint excluded 0.22.0. Toolkit API surface unchanged; all 461 tests pass without code changes against 0.22.0.
+
+  Key 0.22.0 changes visible to toolkit users:
+  - `Registry::register()` now rejects the second concurrent caller with `InvalidInputError(code=DUPLICATE_MODULE_ID)` immediately. `RegistryWriter::write()` registers sequentially and is unaffected under normal usage.
+  - Registration Ordering Invariants: modules are now guaranteed fully visible to `registry.get()` / `registry.list()` immediately on return from `write()`.
+  - `StreamingModule` promoted from duck-typed to explicit trait — `RegistryWriter::with_streaming_handler_factory(factory)` enables streaming via `StreamingHandlerFactory`.
+
 ## [0.7.0] - 2026-05-12
 
 ### Fixed (post-audit cross-SDK reconciliation)

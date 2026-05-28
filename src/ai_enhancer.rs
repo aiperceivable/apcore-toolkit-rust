@@ -513,6 +513,10 @@ impl Enhancer for AIEnhancer {
             }
         }
 
+        // Note: batch_size controls chunk size for rate-limiting/progress tracking only.
+        // Processing is synchronous and sequential within each chunk — this differs from
+        // TypeScript which dispatches all pending modules concurrently via Promise.allSettled.
+        // Parallel dispatch (via rayon) is a planned enhancement.
         for batch in pending.chunks(self.batch_size) {
             for (idx, gaps) in batch {
                 match self.enhance_module(&modules[*idx], gaps) {

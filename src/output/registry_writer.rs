@@ -6,19 +6,42 @@
 // Framework adapters provide a `HandlerFactory` to resolve targets to real
 // async handlers. Without a factory, modules are registered with a passthrough
 // handler that echoes inputs (useful for schema-only registration).
+// For streaming modules, supply a `StreamingHandlerFactory` that maps target
+// strings to `StreamHandlerFn` implementations.
 
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tracing::{debug, warn};
 
 use apcore::context::Context;
 use apcore::errors::ModuleError;
 use apcore::Registry;
+use apcore::{ChunkStream, StreamingModule};
 
 use crate::output::types::{Verifier, WriteResult};
 use crate::output::verifiers::{run_verifier_chain, RegistryVerifier};
 use crate::types::ScannedModule;
+
+/// Async stream-chunk function type for streaming modules.
+///
+/// Maps `(inputs, context)` to a `ChunkStream` (a self-contained async
+/// stream of JSON chunks).  The stream MUST NOT borrow from `ctx` past the
+/// call boundary — capture any needed context data by cloning before
+/// returning.
+pub type StreamHandlerFn =
+    Arc<dyn Fn(serde_json::Value, &Context<serde_json::Value>) -> ChunkStream + Send + Sync>;
+
+/// Factory that resolves a `target` string to a `StreamHandlerFn`.
+///
+/// Provide this to `RegistryWriter::with_streaming_handler_factory` when
+/// you need modules with `annotations.streaming = true` to be registered as
+/// proper `StreamingModule` implementations.  If the factory returns `None`
+/// for a given target, the toolkit falls back to logging a warning and
+/// clearing the `streaming` annotation so `Registry.register` does not
+/// reject the module.
+pub type StreamingHandlerFactory = Arc<dyn Fn(&str) -> Option<StreamHandlerFn> + Send + Sync>;
 
 /// Async handler function type for registered modules.
 pub type HandlerFn = Arc<
@@ -53,6 +76,56 @@ pub type HandlerFn = Arc<
 /// ```
 pub type HandlerFactory = Arc<dyn Fn(&str) -> Option<HandlerFn> + Send + Sync>;
 
+/// A module that implements both `Module` and `StreamingModule`.
+///
+/// Wraps an inner `FunctionModule` for the `execute` path and adds streaming
+/// via a caller-supplied `StreamHandlerFn`.  `as_streaming()` returns
+/// `Some(self)`, satisfying the Registry's streaming-interface check.
+struct StreamingFunctionModule {
+    inner: apcore::decorator::FunctionModule,
+    stream_fn: StreamHandlerFn,
+}
+
+#[async_trait]
+impl apcore::module::Module for StreamingFunctionModule {
+    fn input_schema(&self) -> serde_json::Value {
+        self.inner.input_schema()
+    }
+    fn output_schema(&self) -> serde_json::Value {
+        self.inner.output_schema()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    async fn execute(
+        &self,
+        inputs: serde_json::Value,
+        ctx: &Context<serde_json::Value>,
+    ) -> Result<serde_json::Value, ModuleError> {
+        self.inner.execute(inputs, ctx).await
+    }
+    fn stream(
+        &self,
+        inputs: serde_json::Value,
+        ctx: &Context<serde_json::Value>,
+    ) -> Option<ChunkStream> {
+        Some((self.stream_fn)(inputs, ctx))
+    }
+    fn as_streaming(&self) -> Option<&dyn StreamingModule> {
+        Some(self)
+    }
+}
+
+impl StreamingModule for StreamingFunctionModule {
+    fn stream_typed(
+        &self,
+        inputs: serde_json::Value,
+        ctx: &Context<serde_json::Value>,
+    ) -> ChunkStream {
+        (self.stream_fn)(inputs, ctx)
+    }
+}
+
 /// Registers ScannedModule instances directly into an apcore Registry.
 ///
 /// This is the default writer used when no output_format is specified.
@@ -68,6 +141,13 @@ pub type HandlerFactory = Arc<dyn Fn(&str) -> Option<HandlerFn> + Send + Sync>;
 /// provide a [`HandlerFactory`] that resolves target strings to real handlers.
 pub struct RegistryWriter {
     handler_factory: Option<HandlerFactory>,
+    /// Optional factory for streaming handlers. When a module has
+    /// `annotations.streaming = true`, this factory is queried with the
+    /// module's `target` string. If it returns `Some(stream_fn)`, the module
+    /// is registered as a `StreamingFunctionModule`; otherwise a WARNING is
+    /// logged and the `streaming` annotation is cleared so
+    /// `Registry.register` does not raise `StreamingInterfaceMismatch`.
+    streaming_handler_factory: Option<StreamingHandlerFactory>,
     /// Optional allow-list of `target` prefixes. When set, any module whose
     /// `target` does not start with one of these prefixes is rejected with a
     /// failed `WriteResult` before any handler factory is invoked. Mirrors the
@@ -104,6 +184,7 @@ impl RegistryWriter {
     pub fn new() -> Self {
         Self {
             handler_factory: None,
+            streaming_handler_factory: None,
             allowed_prefixes: None,
         }
     }
@@ -112,8 +193,37 @@ impl RegistryWriter {
     pub fn with_handler_factory(factory: HandlerFactory) -> Self {
         Self {
             handler_factory: Some(factory),
+            streaming_handler_factory: None,
             allowed_prefixes: None,
         }
+    }
+
+    /// Attach a streaming handler factory.
+    ///
+    /// When a module has `annotations.streaming = true`, the factory is called
+    /// with the module's `target` string.  Returning `Some(stream_fn)` causes
+    /// the module to be registered as a `StreamingFunctionModule` (implements
+    /// both `Module` and `StreamingModule`).  Returning `None` causes the
+    /// toolkit to log a WARNING and clear the `streaming` annotation so
+    /// `Registry.register` does not reject the module.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stream_factory: StreamingHandlerFactory = Arc::new(|target: &str| {
+    ///     if target == "myapp:my_streaming_handler" {
+    ///         Some(Arc::new(|inputs, _ctx| {
+    ///             let stream = futures::stream::iter(vec![Ok(json!({"chunk": 1}))]);
+    ///             Box::pin(stream)
+    ///         }))
+    ///     } else {
+    ///         None
+    ///     }
+    /// });
+    /// let writer = RegistryWriter::new().with_streaming_handler_factory(stream_factory);
+    /// ```
+    pub fn with_streaming_handler_factory(mut self, factory: StreamingHandlerFactory) -> Self {
+        self.streaming_handler_factory = Some(factory);
+        self
     }
 
     /// Restrict registration to modules whose `target` starts with one of the
@@ -217,29 +327,11 @@ impl RegistryWriter {
                 continue;
             }
 
-            let fm = self.to_function_module(module);
-            // Register with a descriptor
-            let descriptor = apcore::registry::registry::ModuleDescriptor {
-                module_id: module.module_id.clone(),
-                name: Some(module.module_id.clone()),
-                description: module.description.clone(),
-                documentation: module.documentation.clone(),
-                input_schema: module.input_schema.clone(),
-                output_schema: module.output_schema.clone(),
-                version: module.version.clone(),
-                tags: module.tags.clone(),
-                annotations: module.annotations.clone(),
-                examples: module.examples.clone(),
-                metadata: module.metadata.clone(),
-                display: module.display.clone(),
-                sunset_date: None,
-                dependencies: vec![],
-                enabled: true,
-            };
+            let (module_obj, descriptor) = self.to_module(module);
             // Note: unlike Python/TypeScript, Rust collects per-module registration errors
             // rather than aborting. This is intentional — partial registration is preferred
             // over a hard stop, giving callers the opportunity to inspect and handle each failure.
-            if let Err(e) = registry.register(&module.module_id, Box::new(fm), descriptor) {
+            if let Err(e) = registry.register(&module.module_id, module_obj, descriptor) {
                 warn!(
                     module_id = %module.module_id,
                     error = %e,
@@ -258,16 +350,19 @@ impl RegistryWriter {
             if verify {
                 result = verify_registry(&result, &module.module_id, registry);
             }
-            if result.verified {
-                if let Some(vs) = verifiers {
-                    let chain_result = run_verifier_chain(vs, "", &module.module_id);
-                    if !chain_result.ok {
-                        result = WriteResult::failed(
-                            result.module_id,
-                            result.path,
-                            chain_result.error.unwrap_or_default(),
-                        );
-                    }
+            // Run custom verifiers unconditionally (no gate on result.verified),
+            // aligning with the TypeScript implementation which calls custom
+            // verifiers via Promise.allSettled regardless of the built-in check
+            // outcome. The final `verified` status is the AND-merge of the
+            // built-in result and the custom chain: both must pass.
+            if let Some(vs) = verifiers {
+                let chain_result = run_verifier_chain(vs, "", &module.module_id);
+                if !chain_result.ok {
+                    result = WriteResult::failed(
+                        result.module_id,
+                        result.path,
+                        chain_result.error.unwrap_or_default(),
+                    );
                 }
             }
             results.push(result);
@@ -278,60 +373,123 @@ impl RegistryWriter {
 }
 
 impl RegistryWriter {
-    /// Convert a ScannedModule to an apcore FunctionModule.
+    /// Convert a ScannedModule to a boxed apcore module ready for registration.
     ///
-    /// If a handler factory is configured and resolves the target, uses the
-    /// resolved handler. Otherwise falls back to a passthrough handler that
-    /// returns inputs unchanged.
-    fn to_function_module(&self, module: &ScannedModule) -> apcore::decorator::FunctionModule {
-        let annotations = module.annotations.clone().unwrap_or_default();
+    /// Returns a `StreamingFunctionModule` when `annotations.streaming = true`
+    /// AND the `StreamingHandlerFactory` provides a handler for the target.
+    /// When streaming is declared but no stream handler is available, logs a
+    /// WARNING and clears the annotation so `Registry.register` does not
+    /// raise `StreamingInterfaceMismatch` — the module is registered as a
+    /// plain (non-streaming) `FunctionModule`.
+    ///
+    /// If only a plain `HandlerFactory` is configured (or none), the execute
+    /// handler is resolved from that factory with a passthrough fallback.
+    fn to_module(
+        &self,
+        module: &ScannedModule,
+    ) -> (
+        Box<dyn apcore::module::Module + Send + Sync>,
+        apcore::registry::registry::ModuleDescriptor,
+    ) {
+        let mut annotations = module.annotations.clone().unwrap_or_default();
         let input_schema = module.input_schema.clone();
         let output_schema = module.output_schema.clone();
 
-        // Try to resolve the target via the handler factory
-        if let Some(factory) = &self.handler_factory {
+        // Build the execute handler (shared between streaming and non-streaming).
+        let exec_handler: HandlerFn = if let Some(factory) = &self.handler_factory {
             if let Some(handler) = factory(&module.target) {
-                return apcore::decorator::FunctionModule::new::<_, ()>(
-                    annotations,
-                    input_schema,
-                    output_schema,
-                    move |inputs: serde_json::Value,
-                          ctx: &Context<serde_json::Value>|
-                          -> Pin<
-                        Box<
-                            dyn std::future::Future<Output = Result<serde_json::Value, ModuleError>>
-                                + Send
-                                + '_,
-                        >,
-                    > { handler(inputs, ctx) },
+                handler
+            } else {
+                Self::passthrough_handler()
+            }
+        } else {
+            debug!(
+                module_id = %module.module_id,
+                "RegistryWriter using passthrough handler (no HandlerFactory configured)",
+            );
+            Self::passthrough_handler()
+        };
+
+        // Check for streaming.
+        if annotations.streaming {
+            if let Some(stream_fn) = self
+                .streaming_handler_factory
+                .as_ref()
+                .and_then(|f| f(&module.target))
+            {
+                // Build StreamingFunctionModule.
+                let inner = apcore::decorator::FunctionModule::with_description(
+                    annotations.clone(),
+                    input_schema.clone(),
+                    output_schema.clone(),
+                    module.description.clone(),
+                    module.documentation.clone(),
+                    module.tags.clone(),
+                    module.version.clone(),
+                    module.metadata.clone(),
+                    module.examples.clone(),
+                    move |inputs, ctx| exec_handler(inputs, ctx),
+                );
+                let descriptor = Self::make_descriptor(module, &annotations);
+                return (
+                    Box::new(StreamingFunctionModule { inner, stream_fn }),
+                    descriptor,
                 );
             }
+
+            // Streaming declared but no stream handler available.
+            warn!(
+                module_id = %module.module_id,
+                target = %module.target,
+                "RegistryWriter: module declares annotations.streaming=true but no \
+                 StreamingHandlerFactory provided a handler for this target; clearing \
+                 streaming flag to avoid StreamingInterfaceMismatch at registration. \
+                 Attach a StreamingHandlerFactory via with_streaming_handler_factory().",
+            );
+            annotations.streaming = false;
         }
 
-        // Fallback: passthrough handler (schema-only registration)
-        debug!(
-            module_id = %module.module_id,
-            "RegistryWriter using passthrough handler (no HandlerFactory configured)",
-        );
-        fn passthrough<'a>(
-            inputs: serde_json::Value,
-            _ctx: &'a Context<serde_json::Value>,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<serde_json::Value, ModuleError>>
-                    + Send
-                    + 'a,
-            >,
-        > {
-            Box::pin(async move { Ok(inputs) })
-        }
-
-        apcore::decorator::FunctionModule::new::<_, ()>(
-            annotations,
+        let fm = apcore::decorator::FunctionModule::with_description(
+            annotations.clone(),
             input_schema,
             output_schema,
-            passthrough,
-        )
+            module.description.clone(),
+            module.documentation.clone(),
+            module.tags.clone(),
+            module.version.clone(),
+            module.metadata.clone(),
+            module.examples.clone(),
+            move |inputs, ctx| exec_handler(inputs, ctx),
+        );
+        let descriptor = Self::make_descriptor(module, &annotations);
+        (Box::new(fm), descriptor)
+    }
+
+    fn passthrough_handler() -> HandlerFn {
+        Arc::new(|inputs, _ctx| Box::pin(async move { Ok(inputs) }))
+    }
+
+    fn make_descriptor(
+        module: &ScannedModule,
+        annotations: &apcore::module::ModuleAnnotations,
+    ) -> apcore::registry::registry::ModuleDescriptor {
+        apcore::registry::registry::ModuleDescriptor {
+            module_id: module.module_id.clone(),
+            name: Some(module.module_id.clone()),
+            description: module.description.clone(),
+            documentation: module.documentation.clone(),
+            input_schema: module.input_schema.clone(),
+            output_schema: module.output_schema.clone(),
+            version: module.version.clone(),
+            tags: module.tags.clone(),
+            annotations: Some(annotations.clone()),
+            examples: module.examples.clone(),
+            metadata: module.metadata.clone(),
+            display: module.display.clone(),
+            sunset_date: None,
+            dependencies: vec![],
+            enabled: true,
+        }
     }
 }
 
@@ -556,5 +714,129 @@ mod tests {
         let results = writer.write(&[module], &mut registry, false, false, None);
         assert_eq!(results.len(), 1);
         assert!(registry.has("any.module"));
+    }
+
+    // ── Streaming module tests (apcore 0.22.0) ──────────────────────────────
+
+    fn make_streaming_module() -> ScannedModule {
+        use apcore::module::ModuleAnnotations;
+        let mut m = ScannedModule::new(
+            "stream.test".into(),
+            "streaming module".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec![],
+            "app:stream_handler".into(),
+        );
+        m.annotations = Some(ModuleAnnotations {
+            streaming: true,
+            ..Default::default()
+        });
+        m
+    }
+
+    #[test]
+    fn test_streaming_factory_registers_streaming_module() {
+        // When a StreamingHandlerFactory provides a handler, the module must be
+        // registered as a StreamingFunctionModule (as_streaming() returns Some).
+        use futures::stream;
+        let stream_factory: StreamingHandlerFactory = Arc::new(|_target: &str| {
+            Some(Arc::new(|_inputs: serde_json::Value, _ctx: &_| {
+                let s = stream::iter(vec![Ok(json!({"chunk": 1}))]);
+                Box::pin(s) as ChunkStream
+            }))
+        });
+
+        let writer = RegistryWriter::new().with_streaming_handler_factory(stream_factory);
+        let mut registry = Registry::new();
+        let module = make_streaming_module();
+        let results = writer.write(&[module], &mut registry, false, false, None);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].verified,
+            "streaming module should register successfully"
+        );
+        assert!(registry.has("stream.test"));
+    }
+
+    #[test]
+    fn test_streaming_annotation_no_factory_clears_streaming_and_warns() {
+        // Without a StreamingHandlerFactory, annotations.streaming is cleared so
+        // Registry.register does not raise StreamingInterfaceMismatch. The
+        // module is still registered as a non-streaming FunctionModule.
+        let writer = RegistryWriter::new(); // no streaming factory
+        let mut registry = Registry::new();
+        let module = make_streaming_module();
+        let results = writer.write(&[module], &mut registry, false, false, None);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].verified,
+            "module should register even without streaming factory"
+        );
+        assert!(registry.has("stream.test"));
+    }
+
+    #[test]
+    fn test_non_streaming_module_unaffected_by_streaming_factory() {
+        // A non-streaming module must not be affected by the presence of a
+        // StreamingHandlerFactory.
+        use futures::stream;
+        let stream_factory: StreamingHandlerFactory = Arc::new(|_: &str| {
+            Some(Arc::new(|inputs: serde_json::Value, _ctx: &_| {
+                let s = stream::iter(vec![Ok(inputs)]);
+                Box::pin(s) as ChunkStream
+            }))
+        });
+
+        let writer = RegistryWriter::new().with_streaming_handler_factory(stream_factory);
+        let mut registry = Registry::new();
+        let module = sample_module(); // annotations.streaming = false (default)
+        let results = writer.write(&[module], &mut registry, false, false, None);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].verified);
+        assert!(registry.has("users.get"));
+    }
+
+    #[test]
+    fn test_custom_verifier_runs_unconditionally_and_merge_semantics() {
+        // Issue 4: custom verifiers must run regardless of the built-in verify
+        // result. Final verified = builtin_verified AND custom_chain_ok.
+        // Here verify=true (builtin passes) AND a failing custom verifier —
+        // the AND-merge must yield verified=false.
+        use crate::output::types::{Verifier, VerifyResult};
+
+        struct AlwaysFail;
+        impl Verifier for AlwaysFail {
+            fn verify(&self, _path: &str, _module_id: &str) -> VerifyResult {
+                VerifyResult::fail("custom fail and-merge".into())
+            }
+        }
+
+        let writer = RegistryWriter::new();
+        let mut registry = Registry::new();
+        let modules = vec![sample_module()];
+        let failing_verifier = AlwaysFail;
+        let verifiers: &[&dyn Verifier] = &[&failing_verifier];
+        // verify=true: built-in passes (module registered OK), but custom fails.
+        // AND-merge: final verified must be false.
+        let results = writer.write(&modules, &mut registry, false, true, Some(verifiers));
+        assert_eq!(results.len(), 1);
+        assert!(registry.has("users.get"), "module must be registered");
+        assert!(
+            !results[0].verified,
+            "AND-merge: builtin=true AND custom=false must yield verified=false; got: {:?}",
+            results[0]
+        );
+        assert!(
+            results[0]
+                .verification_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("custom fail and-merge"),
+            "verification_error must contain the custom verifier message"
+        );
     }
 }

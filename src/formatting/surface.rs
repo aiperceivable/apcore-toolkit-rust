@@ -5,8 +5,9 @@
 // and programmatic APIs (json). See
 // `apcore-toolkit/docs/features/formatting.md`.
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
+
+use indexmap::IndexMap;
 
 use apcore::module::ModuleAnnotations;
 use serde_json::{Map, Value};
@@ -116,15 +117,39 @@ const DEFAULT_MAX_DEPTH: usize = 3;
 
 /// Render a JSON Schema for a specific surface.
 ///
+/// Returns `Err(FormatError::SchemaNotObject)` when the schema's top-level
+/// `"type"` field is explicitly set to a non-`"object"` value (e.g. `"array"`,
+/// `"string"`).  Schemas with no `"type"` field are accepted and rendered
+/// as-is (they may be `anyOf`/`allOf` schemas or bare `$ref` schemas).
+///
 /// See `Contract: format_schema` in
 /// `apcore-toolkit/docs/features/formatting.md`.
-pub fn format_schema(schema: &Value, style: SchemaStyle, max_depth: Option<usize>) -> FormatOutput {
+pub fn format_schema(
+    schema: &Value,
+    style: SchemaStyle,
+    max_depth: Option<usize>,
+) -> Result<FormatOutput, FormatError> {
+    // Guard: if "type" is explicitly set to something other than "object",
+    // the schema cannot be rendered as a structured parameter list.
+    if let Some(type_val) = schema.get("type").and_then(|v| v.as_str()) {
+        if type_val != "object" {
+            return Err(FormatError::SchemaNotObject(match type_val {
+                "array" => "array",
+                "string" => "string",
+                "integer" => "integer",
+                "number" => "number",
+                "boolean" => "boolean",
+                "null" => "null",
+                _ => "unknown",
+            }));
+        }
+    }
     let max_depth = max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
-    match style {
+    Ok(match style {
         SchemaStyle::Json => FormatOutput::Value(schema.clone()),
         SchemaStyle::Prose => FormatOutput::Text(render_schema_prose(schema, max_depth, 0)),
         SchemaStyle::Table => FormatOutput::Text(render_schema_table(schema)),
-    }
+    })
 }
 
 fn render_schema_prose(schema: &Value, max_depth: usize, depth: usize) -> String {
@@ -556,8 +581,8 @@ pub fn format_modules(
 fn group_modules<'a>(
     modules: &'a [ScannedModule],
     axis: GroupBy,
-) -> BTreeMap<String, Vec<&'a ScannedModule>> {
-    let mut groups: BTreeMap<String, Vec<&'a ScannedModule>> = BTreeMap::new();
+) -> IndexMap<String, Vec<&'a ScannedModule>> {
+    let mut groups: IndexMap<String, Vec<&'a ScannedModule>> = IndexMap::new();
     for module in modules {
         match axis {
             GroupBy::Prefix => {
@@ -617,6 +642,19 @@ mod tests {
     // ---------- format_schema ----------
 
     #[test]
+    fn test_format_schema_returns_err_for_non_object_schema() {
+        // format_schema must return Err(FormatError::SchemaNotObject) when the
+        // schema's top-level "type" is not "object". Previously it returned a
+        // FormatOutput::Text directly (dead FormatError path).
+        let schema = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+        let result = format_schema(&schema, SchemaStyle::Json, None);
+        assert!(
+            result.is_err(),
+            "Expected Err(FormatError::SchemaNotObject), got Ok variant"
+        );
+    }
+
+    #[test]
     fn schema_prose_marks_required_and_optional() {
         let schema = json!({
             "type": "object",
@@ -626,7 +664,7 @@ mod tests {
             },
             "required": ["id"],
         });
-        let out = format_schema(&schema, SchemaStyle::Prose, None);
+        let out = format_schema(&schema, SchemaStyle::Prose, None).unwrap();
         let s = out.as_str().unwrap();
         assert!(s.contains("`id` (integer, required) — User id"), "got: {s}");
         assert!(s.contains("`verbose` (boolean, optional)"));
@@ -639,7 +677,7 @@ mod tests {
             "properties": {"id": {"type": "integer", "description": "User id"}},
             "required": ["id"],
         });
-        let out = format_schema(&schema, SchemaStyle::Table, None);
+        let out = format_schema(&schema, SchemaStyle::Table, None).unwrap();
         let s = out.as_str().unwrap();
         assert!(s.contains("| Name | Type | Required | Default | Description |"));
         assert!(s.contains("| `id` | integer | yes |  | User id |"));
@@ -648,7 +686,7 @@ mod tests {
     #[test]
     fn schema_json_passthrough() {
         let schema = json!({"type": "object"});
-        let out = format_schema(&schema, SchemaStyle::Json, None);
+        let out = format_schema(&schema, SchemaStyle::Json, None).unwrap();
         assert_eq!(out.as_value().unwrap(), &schema);
     }
 
@@ -668,19 +706,22 @@ mod tests {
                 },
             },
         });
-        let out = format_schema(&schema, SchemaStyle::Prose, Some(2));
+        let out = format_schema(&schema, SchemaStyle::Prose, Some(2)).unwrap();
         assert!(out.as_str().unwrap().contains("```json"));
     }
 
     #[test]
-    fn schema_non_object_renders_summary() {
-        let out = format_schema(&json!({"type": "string"}), SchemaStyle::Prose, None);
-        assert!(out.as_str().unwrap().contains("string"));
+    fn schema_non_object_returns_err() {
+        // After the Issue 2 fix, non-object schemas return Err(FormatError::SchemaNotObject).
+        let err = format_schema(&json!({"type": "string"}), SchemaStyle::Prose, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("string"), "error should mention type: {msg}");
     }
 
     #[test]
     fn schema_empty_prose_returns_empty() {
-        let out = format_schema(&json!({}), SchemaStyle::Prose, None);
+        // Schema with no "type" field at all is accepted (may be allOf/anyOf/$ref).
+        let out = format_schema(&json!({}), SchemaStyle::Prose, None).unwrap();
         assert_eq!(out.as_str().unwrap(), "");
     }
 
@@ -918,6 +959,35 @@ mod tests {
         m.tags = vec![];
         let out = format_modules(&[m], ModuleStyle::Markdown, Some(GroupBy::Tag), true);
         assert!(out.as_str().unwrap().contains("## (untagged)"));
+    }
+
+    #[test]
+    fn test_group_by_preserves_insertion_order() {
+        // First module is tagged "zebra", second is tagged "alpha".
+        // Python/TypeScript use insertion-order maps, so "zebra" must appear
+        // before "alpha" in the output. BTreeMap would sort alphabetically and
+        // emit "alpha" first — this test catches that regression.
+        let mut zebra_mod = fixture_module();
+        zebra_mod.module_id = "z.module".into();
+        zebra_mod.tags = vec!["zebra".into()];
+
+        let mut alpha_mod = fixture_module();
+        alpha_mod.module_id = "a.module".into();
+        alpha_mod.tags = vec!["alpha".into()];
+
+        let out = format_modules(
+            &[zebra_mod, alpha_mod],
+            ModuleStyle::Markdown,
+            Some(GroupBy::Tag),
+            false,
+        );
+        let s = out.as_str().unwrap();
+        let zebra_pos = s.find("## zebra").expect("expected '## zebra' in output");
+        let alpha_pos = s.find("## alpha").expect("expected '## alpha' in output");
+        assert!(
+            zebra_pos < alpha_pos,
+            "zebra group (inserted first) must appear before alpha group; got:\n{s}"
+        );
     }
 
     // ---------- HEAD/OPTIONS canonical mapping (RFC 9110: readonly without cacheable) ----------

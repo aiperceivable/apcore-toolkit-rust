@@ -10,17 +10,14 @@
 //! The crate version is exported as [`VERSION`] to match the `__version__`
 //! / `VERSION` symbols in the Python and TypeScript SDKs.
 //!
-//! # Language-writer parity note
+//! # Language-writer parity
 //!
-//! Python ships [`PythonWriter`] and TypeScript ships [`TypeScriptWriter`]
-//! for generating language-specific binding code. The Rust SDK intentionally
-//! does **not** ship a `RustWriter`: Rust consumers import `apcore-toolkit`
-//! directly and work with the strongly-typed `ScannedModule` / registry APIs
-//! instead of generating source files. This parity gap is intentional and
-//! will not be filled in future releases.
+//! Python ships `PythonWriter`, TypeScript ships `TypeScriptWriter`, and the
+//! Rust SDK ships [`RustWriter`] for generating language-native handler stubs.
+//! The generated files are starting-point stubs; Rust consumers may also work
+//! directly with the strongly-typed `ScannedModule` / registry APIs.
 //!
-//! [`PythonWriter`]: https://github.com/aiperceivable/apcore-toolkit-python
-//! [`TypeScriptWriter`]: https://github.com/aiperceivable/apcore-toolkit-typescript
+//! [`RustWriter`]: crate::output::rust_writer::RustWriter
 //!
 //! # Crate-root re-exports
 //!
@@ -77,6 +74,7 @@ pub use openapi::{
 };
 pub use output::errors::WriteError;
 pub use output::registry_writer::{HandlerFactory, HandlerFn, RegistryWriter};
+pub use output::rust_writer::RustWriter;
 pub use output::types::{Verifier, VerifyResult, WriteResult};
 pub use output::verifiers::{
     run_verifier_chain, JSONVerifier, MagicBytesVerifier, RegistryVerifier, SyntaxVerifier,
