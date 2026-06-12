@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.8.1] - 2026-06-12
+
+Patch release. Bumps the required apcore runtime floor to 0.24.0. Toolkit API surface and code unchanged; all 461 tests pass without modification against 0.24.0.
+
+### Changed
+
+- Required runtime bumped to `apcore = "0.23"` (caret: `>=0.23.0, <0.24.0`) — the prior `"0.22"` caret constraint excluded 0.23+. Toolkit API surface unchanged. Note: apcore 0.24.0 is not yet published to crates.io; a follow-up patch will bump to `"0.24"` once it is indexed.
+
+  Key 0.23.0–0.24.0 changes visible to toolkit users (indirect runtime effects):
+  - **Schema type coercion enabled by default** — `SchemaValidator::new()` now defaults to `coerce_types = true`. String `"42"` coerces to integer `42` before validation; `SchemaValidator::validate_input` / `validate_output` return the coerced value. Toolkit's conformance fixtures do not exercise schema validation, so this is invisible to toolkit callers. Downstream code constructing `SchemaValidator` directly should be aware of the new default.
+  - **`APCore::on()` / `events()` now share the system event bus (D1-011)** — subscribers added via `on()` now receive `apcore.module.toggled`, `apcore.registry.module_registered`, and other system events. Previously these fired into a separate local emitter and were never delivered. Callers subscribing to system events via the `APCore` client now get them.
+  - `Registry::register_module` / `register_versioned` now derive descriptor annotations from `module.annotations()` — previously annotations were discarded (`ModuleAnnotations::default()`). Modules with `requires_approval = true` are now correctly gated. This is a security fix; no toolkit code changes required.
+  - `CircuitBreakerMiddleware` constructor is breaking in 0.23.0 (old `failure_threshold`/`success_threshold` removed). Toolkit does not use this middleware.
+  - AI error-recovery metadata (`user_fixable`, `ai_guidance`) is now auto-populated on `ModuleError` at the framework level (0.23.0).
+
 ## [0.8.0] - 2026-05-28
 
 Aligned release across Python, TypeScript, and Rust. Bumps the required apcore runtime to 0.22.0.
