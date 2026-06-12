@@ -21,7 +21,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-apcore = "0.23"
+apcore = "0.24"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` is required for the toolkit's byte-equivalent tabular
 # formatters (csv / jsonl): object key order MUST match insertion order to
