@@ -105,7 +105,7 @@ impl HTTPProxyRegistryWriter {
     }
 
     /// Register each ScannedModule as an HTTP proxy module.
-    pub fn write(&self, modules: &[ScannedModule], registry: &mut Registry) -> Vec<WriteResult> {
+    pub fn write(&self, modules: &[ScannedModule], registry: &Registry) -> Vec<WriteResult> {
         let mut results: Vec<WriteResult> = Vec::new();
 
         for module in modules {

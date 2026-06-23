@@ -297,7 +297,7 @@ impl RegistryWriter {
     pub fn write(
         &self,
         modules: &[ScannedModule],
-        registry: &mut Registry,
+        registry: &Registry,
         dry_run: bool,
         verify: bool,
         verifiers: Option<&[&dyn Verifier]>,
@@ -523,9 +523,9 @@ mod tests {
     #[test]
     fn test_write_dry_run() {
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![sample_module()];
-        let results = writer.write(&modules, &mut registry, true, false, None);
+        let results = writer.write(&modules, &registry, true, false, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].module_id, "users.get");
         assert!(!registry.has("users.get"));
@@ -534,9 +534,9 @@ mod tests {
     #[test]
     fn test_write_registers_module() {
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![sample_module()];
-        let results = writer.write(&modules, &mut registry, false, false, None);
+        let results = writer.write(&modules, &registry, false, false, None);
         assert_eq!(results.len(), 1);
         assert!(registry.has("users.get"));
     }
@@ -544,9 +544,9 @@ mod tests {
     #[test]
     fn test_write_with_verify() {
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![sample_module()];
-        let results = writer.write(&modules, &mut registry, false, true, None);
+        let results = writer.write(&modules, &registry, false, true, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].verified);
     }
@@ -554,8 +554,8 @@ mod tests {
     #[test]
     fn test_write_empty_list() {
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
-        let results = writer.write(&[], &mut registry, false, false, None);
+        let registry = Registry::new();
+        let results = writer.write(&[], &registry, false, false, None);
         assert!(results.is_empty());
     }
 
@@ -574,12 +574,12 @@ mod tests {
         }
 
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![sample_module()];
         let failing_verifier = AlwaysFail;
         let verifiers: &[&dyn Verifier] = &[&failing_verifier];
         // verify=false: built-in registry check skipped, but custom verifier runs
-        let results = writer.write(&modules, &mut registry, false, false, Some(verifiers));
+        let results = writer.write(&modules, &registry, false, false, Some(verifiers));
         assert_eq!(results.len(), 1);
         // Module was registered successfully
         assert!(registry.has("users.get"));
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn test_write_multiple_modules() {
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![
             ScannedModule::new(
                 "mod.a".into(),
@@ -621,7 +621,7 @@ mod tests {
                 "app:b".into(),
             ),
         ];
-        let results = writer.write(&modules, &mut registry, false, false, None);
+        let results = writer.write(&modules, &registry, false, false, None);
         assert_eq!(results.len(), 2);
         assert!(registry.has("mod.a"));
         assert!(registry.has("mod.b"));
@@ -639,7 +639,7 @@ mod tests {
         // module paths, not target strings with the `:callable` suffix.
         let writer =
             RegistryWriter::new().with_allowed_prefixes(vec!["app".into(), "myapp".into()]);
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let allowed = sample_module(); // target = "app:get_user"
         let denied = ScannedModule::new(
             "evil.module".into(),
@@ -649,7 +649,7 @@ mod tests {
             vec![],
             "evil:run_attacker_code".into(),
         );
-        let results = writer.write(&[allowed, denied], &mut registry, false, false, None);
+        let results = writer.write(&[allowed, denied], &registry, false, false, None);
         assert_eq!(results.len(), 2);
         // app:get_user is in allowed_prefixes — registered.
         assert!(registry.has("users.get"));
@@ -702,7 +702,7 @@ mod tests {
         // every input — preserves existing behaviour for callers that have
         // not opted in.
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let module = ScannedModule::new(
             "any.module".into(),
             "Any target".into(),
@@ -711,7 +711,7 @@ mod tests {
             vec![],
             "anything-goes:func".into(),
         );
-        let results = writer.write(&[module], &mut registry, false, false, None);
+        let results = writer.write(&[module], &registry, false, false, None);
         assert_eq!(results.len(), 1);
         assert!(registry.has("any.module"));
     }
@@ -748,9 +748,9 @@ mod tests {
         });
 
         let writer = RegistryWriter::new().with_streaming_handler_factory(stream_factory);
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let module = make_streaming_module();
-        let results = writer.write(&[module], &mut registry, false, false, None);
+        let results = writer.write(&[module], &registry, false, false, None);
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -766,9 +766,9 @@ mod tests {
         // Registry.register does not raise StreamingInterfaceMismatch. The
         // module is still registered as a non-streaming FunctionModule.
         let writer = RegistryWriter::new(); // no streaming factory
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let module = make_streaming_module();
-        let results = writer.write(&[module], &mut registry, false, false, None);
+        let results = writer.write(&[module], &registry, false, false, None);
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -791,9 +791,9 @@ mod tests {
         });
 
         let writer = RegistryWriter::new().with_streaming_handler_factory(stream_factory);
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let module = sample_module(); // annotations.streaming = false (default)
-        let results = writer.write(&[module], &mut registry, false, false, None);
+        let results = writer.write(&[module], &registry, false, false, None);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].verified);
@@ -816,13 +816,13 @@ mod tests {
         }
 
         let writer = RegistryWriter::new();
-        let mut registry = Registry::new();
+        let registry = Registry::new();
         let modules = vec![sample_module()];
         let failing_verifier = AlwaysFail;
         let verifiers: &[&dyn Verifier] = &[&failing_verifier];
         // verify=true: built-in passes (module registered OK), but custom fails.
         // AND-merge: final verified must be false.
-        let results = writer.write(&modules, &mut registry, false, true, Some(verifiers));
+        let results = writer.write(&modules, &registry, false, true, Some(verifiers));
         assert_eq!(results.len(), 1);
         assert!(registry.has("users.get"), "module must be registered");
         assert!(

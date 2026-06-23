@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.9.0] - 2026-06-23
+
+Minor release. Relaxes the registry-writer signatures so they work with apcore's interior-mutable `Registry`. Source-compatible for existing callers (`&mut T` coerces to `&T`).
+
+### Fixed
+
+- **`RegistryWriter::write` and `HttpProxyWriter::write` required `&mut Registry`, which framework integrations cannot provide** — apcore's `Registry` is interior-mutable (`register(&self, ...)`, backed by `RwLock`), and an `Executor` only exposes `Arc<Registry>`, from which `&mut` is unobtainable. Both writers only ever call `registry.register(...)` (a `&self` method), so they now take `&Registry`. This unblocks using the toolkit writers directly against an executor's shared registry. (`output/registry_writer.rs`, `output/http_proxy_writer.rs`)
+
+
 ## [0.8.1] - 2026-06-12
 
 Patch release. Bumps the required apcore runtime floor to 0.24.0. Toolkit API surface and code unchanged; all 461 tests pass without modification against 0.24.0.
