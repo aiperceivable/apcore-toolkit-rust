@@ -18,7 +18,11 @@ use crate::RegistryWriter;
 /// Panics on a dropped or changed field, so it reads naturally inside a
 /// `#[test]`. `module.annotations` must be `Some(..)` — that is what the
 /// round-trip verifies.
-pub fn assert_annotations_preserved(writer: &RegistryWriter, module: &ScannedModule, registry: &Registry) {
+pub fn assert_annotations_preserved(
+    writer: &RegistryWriter,
+    module: &ScannedModule,
+    registry: &Registry,
+) {
     let source = module
         .annotations
         .as_ref()
@@ -29,7 +33,12 @@ pub fn assert_annotations_preserved(writer: &RegistryWriter, module: &ScannedMod
     let descriptor = registry
         .get_definition(&module.module_id)
         .expect("get_definition failed")
-        .unwrap_or_else(|| panic!("conformance: module '{}' was not registered", module.module_id));
+        .unwrap_or_else(|| {
+            panic!(
+                "conformance: module '{}' was not registered",
+                module.module_id
+            )
+        });
 
     let registered = descriptor.annotations.as_ref().unwrap_or_else(|| {
         panic!(
