@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.10.0] - 2026-07-07
+
+Cross-language parity with the Python toolkit: ship the reusable annotation-preservation conformance check. (The dropped-annotations bug that motivated this existed only in two Python adapters; `axum-apcore` and this toolkit's writer already preserve annotations — verified. This adds the guard against a future Rust adapter silently regressing.) All tests pass (453 lib + integration, 1 new).
+
+### Added
+
+- **`assert_annotations_preserved(writer, module, registry)`** (`src/conformance.rs`, re-exported at the crate root) — registers a `ScannedModule` via a `RegistryWriter` and asserts its governance annotations (`requires_approval`, `destructive`) survive `registry.get_definition`; panics on a dropped/changed field, so it reads naturally in a `#[test]`. New integration test `tests/annotation_conformance.rs` locks the base writer's round-trip against a real `Registry`. Mirrors `assertAnnotationsPreserved` (TypeScript) and `assert_annotations_preserved` (Python).
+
 ## [0.9.0] - 2026-06-23
 
 Minor release. Relaxes the registry-writer signatures so they work with apcore's interior-mutable `Registry`. Source-compatible for existing callers (`&mut T` coerces to `&T`).

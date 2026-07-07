@@ -46,6 +46,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod ai_enhancer;
 pub mod binding_loader;
+pub mod conformance;
 pub mod display;
 pub mod formatting;
 pub mod http_verb_map;
@@ -60,6 +61,7 @@ pub mod types;
 // Re-export primary types at crate root for convenience.
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
 pub use binding_loader::{BindingLoadError, BindingLoader};
+pub use conformance::assert_annotations_preserved;
 pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::{
     format_csv, format_jsonl, format_module, format_modules, format_schema, to_markdown,

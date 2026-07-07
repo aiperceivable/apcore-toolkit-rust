@@ -32,6 +32,7 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `BindingLoadError` | `thiserror`-derived error enum: `PathNotFound`, `FileRead`, `FileTooLarge`, `TooManyFiles`, `YamlParse`, `MissingFields`, `InvalidStructure` |
 | `RegistryWriter` | Registers modules directly into an `apcore::Registry` with pluggable `HandlerFactory` |
 | `HTTPProxyRegistryWriter` | Registers HTTP proxy modules that forward requests to a running API (feature: `http-proxy`) |
+| `assert_annotations_preserved` | Conformance check for adapter tests: registers a module and asserts its behavioral annotations (`requires_approval` / `destructive`) survive `get_definition`; panics otherwise. Guards against a writer silently disabling approval/ACL gating |
 | `Enhancer` | Pluggable trait for metadata enhancement |
 | `AIEnhancer` | SLM-based metadata enhancement for scanned modules |
 | `WriteResult` | Structured result type for all writer operations |
@@ -126,6 +127,25 @@ use apcore_toolkit::RegistryWriter;
 let mut registry = Registry::new();
 let writer = RegistryWriter::new();
 writer.write(&modules, &mut registry, false, false, None);
+```
+
+### Conformance Verification
+
+Approval and ACL gating key on a module's `requires_approval` annotation, which is
+only reachable if annotations survive `scan → register → get_definition`. A writer
+that drops them disables that gate **silently**. Call the shared check from an
+adapter's `#[test]` so any such regression fails loudly:
+
+```rust
+use apcore::module::ModuleAnnotations;
+use apcore::Registry;
+use apcore_toolkit::{assert_annotations_preserved, RegistryWriter};
+
+let mut module = my_scanned_module();
+module.annotations = Some(ModuleAnnotations { destructive: true, requires_approval: true, ..Default::default() });
+
+// Panics if annotations were dropped or changed during registration.
+assert_annotations_preserved(&RegistryWriter::new(), &module, &Registry::new());
 ```
 
 ### Registry with Custom Handler Factory
