@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-apcore = "0.25"
+apcore = ">=0.26"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` is required for the toolkit's byte-equivalent tabular
 # formatters (csv / jsonl): object key order MUST match insertion order to

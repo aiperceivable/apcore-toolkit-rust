@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.10.1] - 2026-07-14
+
+Patch release. Bumps the required `apcore` floor to `0.26` to align the ecosystem on the 0.26.0 governance layer (Execution Policy, governance events, no-handler fail-loud — additive, no breaking changes). No code or API changes.
+
 ## [0.10.0] - 2026-07-07
 
 Cross-language parity with the Python toolkit: ship the reusable annotation-preservation conformance check. (The dropped-annotations bug that motivated this existed only in two Python adapters; `axum-apcore` and this toolkit's writer already preserve annotations — verified. This adds the guard against a future Rust adapter silently regressing.) All tests pass (453 lib + integration, 1 new).
