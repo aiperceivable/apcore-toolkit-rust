@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.10.2] - 2026-09-01
+
+Patch release. Bumps the required `apcore` floor to `0.28`. apcore 0.27.0/0.28.0 are almost entirely ACL/ExecutionPolicy/approval/audit governance work (argument-scoped approval, `ACLRule.approval`, `ConditionOutcome`, `AuditEntry` fields) — none of it touches `Registry`, the `Module` trait, `ModuleDescriptor`, or `ModuleAnnotations`, which is all this toolkit uses (confirmed via grep and by diffing against the current apcore-rust source). No code or API changes; all tests pass unmodified against apcore 0.28.0 (453 lib + 11 integration + 8 doc tests).
+
 ## [0.10.1] - 2026-07-14
 
 Patch release. Bumps the required `apcore` floor to `0.26` to align the ecosystem on the 0.26.0 governance layer (Execution Policy, governance events, no-handler fail-loud — additive, no breaking changes). No code or API changes.
