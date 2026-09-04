@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "apcore-toolkit"
-version = "0.10.2"
+version = "0.11.0"
 dependencies = [
  "apcore",
  "async-trait",
@@ -91,6 +91,7 @@ dependencies = [
  "syn",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "ureq",
  "walkdir",

@@ -51,11 +51,13 @@ pub mod display;
 pub mod formatting;
 pub mod http_verb_map;
 pub mod openapi;
+pub mod openapi_scanner;
 pub mod output;
 pub mod resolve_target;
 pub mod scanner;
 pub mod schema_utils;
 pub mod serializers;
+pub mod tui_view_model;
 pub mod types;
 
 // Re-export primary types at crate root for convenience.
@@ -74,6 +76,10 @@ pub use http_verb_map::{
 pub use openapi::{
     deep_resolve_refs, extract_input_schema, extract_output_schema, resolve_ref, resolve_schema,
 };
+pub use openapi_scanner::{
+    derive_module_id, DeriveModuleIdHook, OpenAPIScanner, ScanOptions, ScannerError,
+    TransformModuleHook, TransformOperationHook,
+};
 pub use output::errors::WriteError;
 pub use output::registry_writer::{HandlerFactory, HandlerFn, RegistryWriter};
 pub use output::rust_writer::RustWriter;
@@ -88,7 +94,14 @@ pub use resolve_target::{resolve_target, ResolveTargetError, ResolvedTarget};
 pub use scanner::{deduplicate_ids, filter_modules, infer_annotations_from_method, BaseScanner};
 pub use schema_utils::enrich_schema_descriptions;
 pub use serializers::{annotations_to_dict, module_to_dict, modules_to_dicts};
+pub use tui_view_model::{
+    format_view_model, modules_to_view_model, Cell, Column, Direction, Exposure, Filter, Group,
+    Justify, ModulesToViewModelOptions, Sort, Tone, TonePalette, ToneRule, TuiViewModel, View,
+    ViewGroupBy,
+};
 pub use types::{clone_module, create_scanned_module, ScannedModule};
 
+#[cfg(feature = "http-proxy")]
+pub use openapi_scanner::{load_spec, load_spec_with_options, LoadSpecError, LoadSpecOptions};
 #[cfg(feature = "http-proxy")]
 pub use output::http_proxy_writer::{HTTPProxyRegistryWriter, HTTPProxyRegistryWriterError};

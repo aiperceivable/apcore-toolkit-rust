@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.11.0] - 2026-09-04
+
+Feature release: ships `OpenAPIScanner` and `TuiViewModel`, version-aligned with the Python and TypeScript SDKs. Also fixes two pre-existing `HTTPProxyRegistryWriter` defects that this release's `OpenAPIScanner` makes reachable in normal use.
+
+### Added
+
+- **`OpenAPIScanner`, `derive_module_id`, `ScannerError`, `ScanOptions`, `load_spec`** (`src/openapi_scanner.rs`; `load_spec` behind the `http-proxy` feature) — turn an OpenAPI 3.0/3.1 document into a `Vec<ScannedModule>`, one module per operation. `OpenAPIScanner` is a standalone struct rather than a `BaseScanner` impl — the trait's fixed single-argument, infallible-return shape doesn't fit multiple named options plus a fallible spec-validation path; it reuses the trait's free functions (`filter_modules`, `deduplicate_ids`, `infer_annotations_from_method`) directly instead. See the note in `docs/features/openapi-scanner.md` and tracked issue #4.
+- **`TuiViewModel`, `Column`, `Row`, `Cell`, `Sort`, `Filter`, `TonePalette`, `ToneRule`, `Group`, `ViewGroupBy`, `ModulesToViewModelOptions`, `modules_to_view_model`, `format_view_model`** (`src/tui_view_model.rs`) — byte-equivalent module-list view-model builder and canonical JSON encoder.
+- 37 new tests: 35 conformance cases against the shared corpus in `apcore-toolkit/conformance/fixtures/` (`tests/openapi_scan_conformance.rs`, `tests/view_model_conformance.rs`) plus 2 `HTTPProxyRegistryWriter` regression tests for the fixes below.
+
+### Fixed
+
+- **`HTTPProxyRegistryWriter` rejected `HEAD`/`OPTIONS`/`TRACE` before any network call**, even though all eight OpenAPI HTTP methods are recognised by the scanner and the Python/TypeScript writers carry no such restriction. Added the three missing method-match arms.
+- **The post-substitution "unfilled path parameter" check used a narrower regex (`\{(\w+)\}`, word-characters-only) than the extraction/substitution path (`\{[^}]+\}`)**, so a hyphenated path parameter (e.g. `{item-id}`) left unfilled by the caller was not flagged. Path-parameter *extraction and substitution* were already correct — this is a narrower, corrected diagnosis than the defect as originally filed (see `docs/features/openapi-scanner.md`). Fixed by having the check reuse the same extraction function; removed the now-dead second regex.
+
+All tests pass unmodified plus the new suites (477 lib + 13 integration + 8 doc tests, up from 453 lib + 11 integration + 8 doc at 0.10.2). `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` clean.
+
 ## [0.10.2] - 2026-09-01
 
 Patch release. Bumps the required `apcore` floor to `0.28`. apcore 0.27.0/0.28.0 are almost entirely ACL/ExecutionPolicy/approval/audit governance work (argument-scoped approval, `ACLRule.approval`, `ConditionOutcome`, `AuditEntry` fields) — none of it touches `Registry`, the `Module` trait, `ModuleDescriptor`, or `ModuleAnnotations`, which is all this toolkit uses (confirmed via grep and by diffing against the current apcore-rust source). No code or API changes; all tests pass unmodified against apcore 0.28.0 (453 lib + 11 integration + 8 doc tests).

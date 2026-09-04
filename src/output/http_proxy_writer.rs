@@ -4,10 +4,9 @@
 // requests to a running web API. Feature-gated behind `http-proxy`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use regex::Regex;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -184,25 +183,34 @@ fn get_http_fields(module: &ScannedModule) -> (String, String) {
 /// Python and TypeScript SDKs.
 const BODY_METHODS: &[&str] = &["POST", "PUT", "PATCH"];
 
-/// Regex matching URL path parameters like `{user_id}`.
-static PATH_PARAM_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\{(\w+)\}").expect("static regex"));
-
 /// Validate that all `{param}` placeholders in `actual_path` were substituted.
 ///
 /// Returns `Err` with the list of still-unfilled parameter names if any remain.
+///
+/// # Defect W1 fix
+///
+/// This previously used a narrow `\{(\w+)\}` (word-characters-only) regex,
+/// distinct from the broad `\{[^}]+\}` pattern [`extract_path_param_names`]
+/// uses for extraction/substitution. Path-parameter extraction and
+/// substitution were already correct for OpenAPI-style hyphenated names
+/// like `{item-id}` (both go through [`extract_path_param_names`]); only
+/// this *unfilled-placeholder* check had narrower breadth than the
+/// extraction path, so a hyphenated param left unfilled by the caller
+/// would not have been flagged here. Reusing
+/// [`extract_path_param_names`] — the same function that already governs
+/// extraction and substitution — closes that gap and removes the second,
+/// divergent regex literal entirely.
 fn validate_path_params_filled(actual_path: &str) -> Result<(), String> {
-    if PATH_PARAM_RE.is_match(actual_path) {
-        let unfilled: Vec<&str> = PATH_PARAM_RE
-            .captures_iter(actual_path)
-            .filter_map(|cap| cap.get(1).map(|m| m.as_str()))
-            .collect();
+    let unfilled = extract_path_param_names(actual_path);
+    if unfilled.is_empty() {
+        Ok(())
+    } else {
+        let mut names: Vec<&str> = unfilled.iter().map(String::as_str).collect();
+        names.sort_unstable();
         Err(format!(
             "Missing required path parameters {:?} — inputs must supply values for all path params in '{actual_path}'",
-            unfilled
+            names
         ))
-    } else {
-        Ok(())
     }
 }
 
@@ -331,12 +339,22 @@ impl Module for ProxyModule {
 
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), actual_path);
 
+        // Defect W2 fix: HEAD/OPTIONS/TRACE are OpenAPI-recognised
+        // operations (see `openapi_scanner::RECOGNIZED_METHODS`) that
+        // previously errored here with "Unsupported HTTP method" before
+        // any network call was attempted — Python/TypeScript writers
+        // carry no such restriction. `reqwest::Client` has a `.head()`
+        // convenience method; OPTIONS/TRACE have none, so the generic
+        // `.request(Method, url)` form is used for those two.
         let mut request = match self.http_method.as_str() {
             "GET" => self.client.get(&url),
             "POST" => self.client.post(&url),
             "PUT" => self.client.put(&url),
             "PATCH" => self.client.patch(&url),
             "DELETE" => self.client.delete(&url),
+            "HEAD" => self.client.head(&url),
+            "OPTIONS" => self.client.request(reqwest::Method::OPTIONS, &url),
+            "TRACE" => self.client.request(reqwest::Method::TRACE, &url),
             other => {
                 return Err(ModuleError::new(
                     apcore::errors::ErrorCode::ModuleExecuteError,
@@ -573,6 +591,119 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("user_id") || msg.contains("task_id"), "{msg}");
+    }
+
+    // W1 regression: the narrow `\{(\w+)\}` validator regex could not
+    // match a hyphenated OpenAPI-style path parameter like `{item-id}`,
+    // so an unfilled hyphenated param was silently NOT flagged (the
+    // literal `{item-id}` was left in the URL with no error). Now that
+    // `validate_path_params_filled` reuses `extract_path_param_names`
+    // (the same broad `\{[^}]+\}` extraction already used for
+    // substitution), the hyphenated param is correctly recognised and
+    // flagged as unfilled.
+    #[test]
+    fn test_validate_path_params_filled_hyphenated_param_now_flagged() {
+        let result = validate_path_params_filled("/items/{item-id}");
+        assert!(
+            result.is_err(),
+            "a hyphenated unfilled path param must now be flagged (W1 fix)"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("item-id"),
+            "error should name the unfilled hyphenated param: {msg}"
+        );
+    }
+
+    // W2 regression: HTTPProxyRegistryWriter's method-match block
+    // previously handled only GET/POST/PUT/PATCH/DELETE and rejected
+    // HEAD/OPTIONS/TRACE with "Unsupported HTTP method: <verb>" *before*
+    // any network call was attempted — even though OpenAPI (and the
+    // Python/TypeScript writers) recognise all eight HTTP verbs. This
+    // drives `ProxyModule::execute` against a real loopback HTTP server
+    // to prove the request is now actually built and sent for each of
+    // the three previously-unsupported methods.
+    fn spawn_mock_server(
+        response: &'static str,
+        connections: usize,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..connections {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    use std::io::{Read, Write};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn test_execute_head_options_trace_now_supported() {
+        // 204 No Content sidesteps response-body parsing entirely (the
+        // handler short-circuits to `Ok(json!({}))` for status 204), so
+        // this test isolates exactly what W2 fixes — request construction
+        // and dispatch for a method that was previously rejected outright
+        // — without depending on HTTP body-framing behaviour for HEAD
+        // responses (which real HTTP clients suppress regardless of any
+        // `Content-Length` a test server claims).
+        const RESPONSE: &str = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+        let (addr, handle) = spawn_mock_server(RESPONSE, 3);
+
+        for method in ["HEAD", "OPTIONS", "TRACE"] {
+            let proxy = ProxyModule {
+                base_url: format!("http://{addr}"),
+                http_method: method.to_string(),
+                url_path: "/widgets".to_string(),
+                path_params: HashSet::new(),
+                input_schema: json!({}),
+                output_schema: json!({}),
+                description: "test".to_string(),
+                auth_header_factory: None,
+                client: reqwest::Client::new(),
+            };
+            let ctx = Context::create(None, None, None, None, json!({}), None);
+            let result = proxy.execute(json!({}), &ctx).await;
+            assert!(
+                result.is_ok(),
+                "{method} should now be supported (previously errored with \
+                 'Unsupported HTTP method: {method}'): {result:?}"
+            );
+        }
+
+        handle.join().expect("mock server thread panicked");
+    }
+
+    #[tokio::test]
+    async fn test_execute_trace_previously_unsupported_error_gone() {
+        // Without W2, this would fail fast with
+        // `Unsupported HTTP method: TRACE` before ever touching the
+        // network — assert the specific old error string is gone, using
+        // a closed port so the test doesn't depend on a live server.
+        let proxy = ProxyModule {
+            base_url: "http://127.0.0.1:1".to_string(), // reserved, always refused
+            http_method: "TRACE".to_string(),
+            url_path: "/widgets".to_string(),
+            path_params: HashSet::new(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            description: "test".to_string(),
+            auth_header_factory: None,
+            client: reqwest::Client::new(),
+        };
+        let ctx = Context::create(None, None, None, None, json!({}), None);
+        let result = proxy.execute(json!({}), &ctx).await;
+        assert!(result.is_err(), "connection to a closed port must fail");
+        let message = result.unwrap_err().to_string();
+        assert!(
+            !message.contains("Unsupported HTTP method"),
+            "TRACE must be recognised by the method-match block: {message}"
+        );
     }
 
     #[test]

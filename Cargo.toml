@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
@@ -64,3 +64,9 @@ all = { level = "deny", priority = -1 }
 [dev-dependencies]
 futures = "0.3"
 tempfile = "3"
+# Test-only: driving `reqwest`'s async client against a real (loopback)
+# HTTP server in the W2 regression test (HEAD/OPTIONS/TRACE support in
+# HTTPProxyRegistryWriter) requires a real async I/O reactor — `futures`'
+# bare `block_on` executor has none. Not a runtime dependency of the
+# crate itself.
+tokio = { version = "1", features = ["rt", "macros", "net", "time"] }
