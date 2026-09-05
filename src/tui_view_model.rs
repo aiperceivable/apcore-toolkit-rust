@@ -386,11 +386,21 @@ impl TuiViewModel {
         if let Some(filter) = &self.filter {
             d.insert("filter".to_string(), filter.to_value());
         }
+        // Unlike `groups`/`sort`/`filter` (omitted purely on `None`-ness),
+        // `tone_palettes` is also omitted when present-but-empty, mirroring
+        // Python's `if self.tone_palettes:` (truthy/non-empty check) and
+        // TypeScript's explicit `.length > 0` check. `modules_to_view_model`
+        // itself never produces `Some(vec![])` (empty input is normalized to
+        // `None` before construction), but `TuiViewModel`'s fields are all
+        // `pub`, so a hand-built value passed directly to `format_view_model`
+        // can reach this state.
         if let Some(tone_palettes) = &self.tone_palettes {
-            d.insert(
-                "tone_palettes".to_string(),
-                Value::Array(tone_palettes.iter().map(TonePalette::to_value).collect()),
-            );
+            if !tone_palettes.is_empty() {
+                d.insert(
+                    "tone_palettes".to_string(),
+                    Value::Array(tone_palettes.iter().map(TonePalette::to_value).collect()),
+                );
+            }
         }
         Value::Object(d)
     }
@@ -449,13 +459,33 @@ fn column_label(key: &str) -> String {
     }
 }
 
+/// Coerce a `display` overlay field to a display string, mirroring the
+/// truthy-coercion the Python (`if alias: return str(alias)`) and
+/// TypeScript SDKs apply to a loosely-typed JSON value.
+///
+/// `display` is documented and typed as `Option<serde_json::Value>` in all
+/// three SDKs, so a hand-authored binding (e.g. `display: {alias: 007}`)
+/// may carry a non-string JSON value. Strings and numbers/bools are
+/// reasonably stringifiable and are coerced directly (matching what
+/// `str()`/`String()` would produce); `Null`, `Array`, and `Object` are not
+/// reasonably stringifiable as a display value and fall through to the
+/// caller's fallback, matching Python's `if alias:` treating `None`/`[]`/
+/// `{}` as falsy. An empty string is likewise falsy in Python and falls
+/// through here too.
+fn display_field_as_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 fn resolve_alias(module: &ScannedModule, use_display: bool) -> String {
     if use_display {
         if let Some(display) = &module.display {
-            if let Some(alias) = display.get("alias").and_then(Value::as_str) {
-                if !alias.is_empty() {
-                    return alias.to_string();
-                }
+            if let Some(alias) = display.get("alias").and_then(display_field_as_string) {
+                return alias;
             }
         }
     }
@@ -465,10 +495,9 @@ fn resolve_alias(module: &ScannedModule, use_display: bool) -> String {
 fn resolve_description(module: &ScannedModule, use_display: bool) -> String {
     if use_display {
         if let Some(display) = &module.display {
-            if let Some(description) = display.get("description").and_then(Value::as_str) {
-                if !description.is_empty() {
-                    return description.to_string();
-                }
+            if let Some(description) = display.get("description").and_then(display_field_as_string)
+            {
+                return description;
             }
         }
     }
@@ -814,5 +843,123 @@ mod tests {
             Cell::Text { value, .. } => assert_eq!(value, "a.second"),
             other => panic!("expected Cell::Text, got {other:?}"),
         }
+    }
+
+    // Regression tests: `display.alias`/`display.description` are typed as
+    // loosely-typed JSON (`Option<serde_json::Value>`) in all three SDKs, so
+    // a hand-authored binding like `display: {alias: 007}` or
+    // `{alias: true}` is valid input. Python/TypeScript coerce ANY truthy
+    // value to a string (`str(alias)`/`String(alias)`); `resolve_alias` /
+    // `resolve_description` previously required the value already be a
+    // JSON string (`.and_then(Value::as_str)`), silently falling back to
+    // the raw `module_id`/`description` for a number or bool value instead
+    // of stringifying it — a cross-SDK behavioural divergence on the same
+    // binding document.
+    #[test]
+    fn test_resolve_alias_coerces_numeric_display_value() {
+        let mut module = make_module("svc.thing", "A thing", &[]);
+        module.display = Some(json!({"alias": 42}));
+        let options = ModulesToViewModelOptions {
+            columns: vec!["alias".into()],
+            display: true,
+            ..Default::default()
+        };
+        let vm = modules_to_view_model(&[module], &options);
+        match &vm.rows[0].cells[0] {
+            Cell::Text { value, .. } => assert_eq!(
+                value, "42",
+                "numeric display.alias must be stringified, not fall back to module_id"
+            ),
+            other => panic!("expected Cell::Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_alias_coerces_boolean_display_value() {
+        let mut module = make_module("svc.thing", "A thing", &[]);
+        module.display = Some(json!({"alias": true}));
+        let options = ModulesToViewModelOptions {
+            columns: vec!["alias".into()],
+            display: true,
+            ..Default::default()
+        };
+        let vm = modules_to_view_model(&[module], &options);
+        match &vm.rows[0].cells[0] {
+            Cell::Text { value, .. } => assert_eq!(
+                value, "true",
+                "boolean display.alias must be stringified, not fall back to module_id"
+            ),
+            other => panic!("expected Cell::Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_description_coerces_numeric_display_value() {
+        let mut module = make_module("svc.thing", "A thing", &[]);
+        module.display = Some(json!({"description": 7}));
+        let options = ModulesToViewModelOptions {
+            columns: vec!["description".into()],
+            display: true,
+            ..Default::default()
+        };
+        let vm = modules_to_view_model(&[module], &options);
+        match &vm.rows[0].cells[0] {
+            Cell::Text { value, .. } => assert_eq!(
+                value, "7",
+                "numeric display.description must be stringified, not fall back to raw description"
+            ),
+            other => panic!("expected Cell::Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_alias_still_falls_back_for_null_array_object() {
+        // Null/Array/Object are not reasonably stringifiable as a display
+        // value and Python's `if alias:` treats None/[]/{} as falsy too —
+        // these must keep falling through to the module_id fallback.
+        for bad_value in [json!(null), json!([]), json!({})] {
+            let mut module = make_module("svc.thing", "A thing", &[]);
+            module.display = Some(json!({"alias": bad_value}));
+            let options = ModulesToViewModelOptions {
+                columns: vec!["alias".into()],
+                display: true,
+                ..Default::default()
+            };
+            let vm = modules_to_view_model(&[module], &options);
+            match &vm.rows[0].cells[0] {
+                Cell::Text { value, .. } => assert_eq!(
+                    value, "svc.thing",
+                    "non-stringifiable display.alias {bad_value:?} must fall back to module_id"
+                ),
+                other => panic!("expected Cell::Text, got {other:?}"),
+            }
+        }
+    }
+
+    // Regression test: Python (`if self.tone_palettes:`) and TypeScript
+    // (`.length > 0`) both omit `tone_palettes` from the encoded view model
+    // when the list is present-but-empty — unlike `groups`/`sort`/`filter`,
+    // which are omitted purely on `None`-ness. `modules_to_view_model`
+    // itself never produces `Some(vec![])`, but `TuiViewModel`'s fields are
+    // all `pub`, so a hand-built value passed directly to
+    // `format_view_model` can reach this state.
+    #[test]
+    fn test_format_view_model_omits_empty_tone_palettes() {
+        let vm = TuiViewModel {
+            kind: View::List,
+            columns: vec![],
+            rows: vec![],
+            schema_version: 1,
+            title: None,
+            groups: None,
+            sort: None,
+            filter: None,
+            tone_palettes: Some(vec![]),
+        };
+        let encoded = format_view_model(&vm);
+        assert!(
+            !encoded.contains("tone_palettes"),
+            "present-but-empty tone_palettes must be omitted, matching Python/TypeScript; got: {encoded}"
+        );
     }
 }
