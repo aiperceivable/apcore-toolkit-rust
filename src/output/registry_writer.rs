@@ -400,6 +400,14 @@ impl RegistryWriter {
             if let Some(handler) = factory(&module.target) {
                 handler
             } else {
+                warn!(
+                    module_id = %module.module_id,
+                    target = %module.target,
+                    "RegistryWriter: HandlerFactory returned no handler for this target; \
+                     falling back to a passthrough (echo) handler. Attach a matching \
+                     handler via with_handler_factory() if this target should execute \
+                     real logic.",
+                );
                 Self::passthrough_handler()
             }
         } else {
@@ -837,6 +845,100 @@ mod tests {
                 .unwrap_or("")
                 .contains("custom fail and-merge"),
             "verification_error must contain the custom verifier message"
+        );
+    }
+
+    // Regression test: when a configured `HandlerFactory` returns `None`
+    // for a module's target, `to_module` falls back to a passthrough
+    // (echo) handler. The streaming-handler-factory branch in this same
+    // file already logs a `tracing::warn!` when ITS factory returns
+    // `None` for a target (see `test_streaming_annotation_no_factory_clears_streaming_and_warns`
+    // above); the plain (non-streaming) `HandlerFactory` path previously
+    // had no equivalent warning, silently registering a mismatched
+    // handler with zero logging. This crate has no existing log-capture
+    // test infrastructure (no `tracing-test` dev-dependency), so a
+    // minimal `tracing::Subscriber` is implemented inline here to assert
+    // the warning actually fires — the primary regression check — in
+    // addition to confirming the passthrough-fallback behaviour itself
+    // is unchanged.
+    #[test]
+    fn test_handler_factory_none_warns_and_falls_back_to_passthrough() {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+
+        #[derive(Default)]
+        struct FieldCollector {
+            message: String,
+            fields: std::collections::BTreeMap<String, String>,
+        }
+
+        impl Visit for FieldCollector {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let s = format!("{value:?}");
+                if field.name() == "message" {
+                    self.message = s;
+                } else {
+                    self.fields.insert(field.name().to_string(), s);
+                }
+            }
+        }
+
+        struct RecordingSubscriber {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Subscriber for RecordingSubscriber {
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _span: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _span: &Id, _values: &Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut collector = FieldCollector::default();
+                event.record(&mut collector);
+                let mut combined = collector.message;
+                for (k, v) in &collector.fields {
+                    combined.push_str(&format!(" {k}={v}"));
+                }
+                self.events.lock().unwrap().push(combined);
+            }
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+        }
+
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber {
+            events: events.clone(),
+        };
+
+        let factory: HandlerFactory = Arc::new(|_target: &str| None);
+        let writer = RegistryWriter::with_handler_factory(factory);
+        let registry = Registry::new();
+        let module = sample_module();
+
+        let results = tracing::subscriber::with_default(subscriber, || {
+            writer.write(&[module], &registry, false, false, None)
+        });
+
+        assert_eq!(results.len(), 1);
+        // Passthrough-fallback behaviour and `verified` semantics must be
+        // unchanged by this fix.
+        assert!(results[0].verified);
+        assert!(registry.has("users.get"));
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|m| {
+                let lower = m.to_lowercase();
+                lower.contains("no handler") || lower.contains("passthrough")
+            }),
+            "expected a tracing::warn! to fire when HandlerFactory returns None \
+             for a target; captured events: {captured:?}"
         );
     }
 }
