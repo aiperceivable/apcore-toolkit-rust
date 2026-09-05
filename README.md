@@ -171,9 +171,9 @@ writer.write(&modules, &mut registry, false, false, None);
 ```rust
 use apcore_toolkit::{get_writer, OutputFormat};
 
-let format = get_writer("yaml");       // Some(OutputFormat::Yaml)
-let format = get_writer("registry");   // Some(OutputFormat::Registry)
-let format = get_writer("http-proxy"); // Some(OutputFormat::HttpProxy)
+let format = get_writer("yaml").unwrap();       // OutputFormat::Yaml
+let format = get_writer("registry").unwrap();   // OutputFormat::Registry
+let format = get_writer("http-proxy").unwrap(); // OutputFormat::HTTPProxy
 ```
 
 ### OpenAPI Schema Extraction
