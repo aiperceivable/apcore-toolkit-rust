@@ -237,12 +237,12 @@ pub fn extract_input_schema(operation: &Value, openapi_doc: Option<&Value>) -> V
         properties = resolved_props;
     }
 
-    // Deduplicate required list while preserving order (params + body can overlap)
+    // Deduplicate required list while preserving order (params + body can overlap).
+    // Key by the value's own JSON serialization rather than `as_str().unwrap_or("")` —
+    // the latter collides distinct non-string entries (e.g. `123` and `true`) onto the
+    // same empty-string key, silently dropping all but the first.
     let mut seen = std::collections::HashSet::new();
-    required.retain(|v| {
-        let key = v.as_str().unwrap_or("").to_string();
-        seen.insert(key)
-    });
+    required.retain(|v| seen.insert(v.to_string()));
 
     json!({
         "type": "object",
@@ -429,6 +429,48 @@ mod tests {
         let req = result["required"].as_array().unwrap();
         let id_count = req.iter().filter(|v| v.as_str() == Some("id")).count();
         assert_eq!(id_count, 1, "required list should deduplicate; got {req:?}");
+    }
+
+    #[test]
+    fn test_extract_input_schema_required_dedup_does_not_collide_non_string_entries() {
+        // A malformed body schema whose `required` array contains multiple distinct
+        // non-string entries (123 and true) must not collide onto the same dedup key
+        // (the old `as_str().unwrap_or("")` bug keyed every non-string value by "").
+        let doc = json!({
+            "components": {
+                "schemas": {
+                    "Body": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+                        "required": ["id", 123, "name", true]
+                    }
+                }
+            }
+        });
+        let op = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/Body"}
+                    }
+                }
+            }
+        });
+        let result = extract_input_schema(&op, Some(&doc));
+        let req = result["required"].as_array().unwrap();
+        assert!(
+            req.contains(&json!(123)),
+            "expected 123 to survive dedup; got {req:?}"
+        );
+        assert!(
+            req.contains(&json!(true)),
+            "expected true to survive dedup; got {req:?}"
+        );
+        assert_eq!(
+            req.len(),
+            4,
+            "all 4 distinct required entries should survive; got {req:?}"
+        );
     }
 
     #[test]
