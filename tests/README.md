@@ -15,10 +15,26 @@ This directory contains black-box integration tests that exercise the
 public API from outside the crate (mirroring the per-module test files
 present in the Python and TypeScript SDKs), plus shared fixtures:
 
-- `public_api_integration.rs` — smoke-tests every crate-root re-export
-  (`VERSION`, `get_writer`, `resolve_http_verb`, path-param helpers, etc.).
+- `public_api_integration.rs` — exercises a representative sample of
+  crate-root re-exports (`VERSION`, `get_writer`, `resolve_http_verb`,
+  path-param helpers, `InvalidFormatError`, `OutputFormat`, etc.), not an
+  exhaustive list — most public symbols are covered by inline unit tests
+  colocated with their source files instead.
 - `scanner_verb_map_conformance.rs` — runs every case in the shared
   conformance fixture against `generate_suggested_alias`.
+- `annotation_conformance.rs` — locks the `RegistryWriter` scan → register →
+  `get_definition` round-trip that approval/ACL gating depends on, via
+  `assert_annotations_preserved` against a real `apcore::Registry`.
+- `display_resolve_conformance.rs` — cross-SDK conformance harness for
+  `DisplayResolver` against the shared `display_resolve.json` corpus.
+- `openapi_scan_conformance.rs` — cross-SDK conformance harness asserting
+  `OpenAPIScanner` matches the shared `openapi_scan.json` corpus.
+- `tabular_conformance.rs` — cross-SDK conformance harness asserting
+  `format_csv` / `format_jsonl` produce byte-identical output against the
+  shared tabular fixture corpus.
+- `view_model_conformance.rs` — cross-SDK conformance harness asserting
+  `modules_to_view_model` / `format_view_model` produce byte-identical
+  output against the shared `view_model.json` corpus.
 - `fixtures/scanner_verb_map.json` — HTTP verb map test data (shared with
   the Python and TypeScript SDKs).
 
