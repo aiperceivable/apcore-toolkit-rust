@@ -15,7 +15,7 @@ use apcore::errors::ModuleError;
 use apcore::module::Module;
 use apcore::Registry;
 
-use crate::http_verb_map::extract_path_param_names;
+use crate::http_verb_map::{extract_path_param_names, substitute_path_params};
 use crate::output::types::WriteResult;
 use crate::types::ScannedModule;
 
@@ -300,7 +300,7 @@ impl Module for ProxyModule {
         inputs: serde_json::Value,
         _ctx: &Context<serde_json::Value>,
     ) -> Result<serde_json::Value, ModuleError> {
-        let mut actual_path = self.url_path.clone();
+        let mut path_param_values: HashMap<&str, String> = HashMap::new();
         let mut query: HashMap<String, String> = HashMap::new();
         let mut body: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
@@ -312,10 +312,7 @@ impl Module for ProxyModule {
                         serde_json::Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    actual_path = actual_path.replace(
-                        &format!("{{{key}}}"),
-                        &percent_encode_path_segment(&val_str),
-                    );
+                    path_param_values.insert(key.as_str(), percent_encode_path_segment(&val_str));
                 } else if uses_body {
                     body.insert(key.clone(), value.clone());
                 } else {
@@ -329,6 +326,15 @@ impl Module for ProxyModule {
                 }
             }
         }
+
+        // Use the shared, general-purpose substitution helper so both
+        // `{name}` and `:name` placeholder styles are filled in. A manual
+        // brace-only `.replace()` here previously left colon-style
+        // placeholders (e.g. `:id`) untouched even though their values
+        // were correctly extracted out of `inputs` above, causing every
+        // request against a colon-style route to fail path-param
+        // validation below.
+        let actual_path = substitute_path_params(&self.url_path, &path_param_values);
 
         if let Err(msg) = validate_path_params_filled(&actual_path) {
             return Err(ModuleError::new(
@@ -677,6 +683,95 @@ mod tests {
         }
 
         handle.join().expect("mock server thread panicked");
+    }
+
+    // Regression test: `extract_path_param_names` correctly recognises
+    // colon-style placeholders (`:id`), so `id`'s value is pulled out of
+    // `inputs` and excluded from the query/body — but the URL
+    // substitution step previously did a manual, brace-only
+    // `actual_path.replace(&format!("{{{key}}}"), ...)`, which never
+    // matches `:id`. That left the literal `:id` in the URL and tripped
+    // `validate_path_params_filled`'s "Missing required path parameters"
+    // check on every request against a colon-style route. The fix
+    // routes substitution through the shared `substitute_path_params`
+    // helper, which handles both `{id}` and `:id` styles.
+    #[tokio::test]
+    async fn test_execute_colon_style_path_param_substituted() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("local_addr");
+        // Non-blocking with a bounded retry loop: if the fix regresses and
+        // the request is never sent (e.g. execute() short-circuits on a
+        // still-unfilled path param before touching the network), this
+        // thread must still terminate on its own within a couple of
+        // seconds instead of hanging the test suite on a blocking accept().
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        let (tx, rx) = mpsc::channel::<String>();
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break Some(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            if let Some(mut stream) = stream {
+                let _ = stream.set_nonblocking(false);
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                let _ = tx.send(request_line);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let mut path_params = HashSet::new();
+        path_params.insert("id".to_string());
+        let proxy = ProxyModule {
+            base_url: format!("http://{addr}"),
+            http_method: "GET".to_string(),
+            url_path: "/users/:id".to_string(),
+            path_params,
+            input_schema: json!({}),
+            output_schema: json!({}),
+            description: "test".to_string(),
+            auth_header_factory: None,
+            client: reqwest::Client::new(),
+        };
+        let ctx = Context::create(None, None, None, None, json!({}), None);
+        let result = proxy.execute(json!({"id": "42"}), &ctx).await;
+
+        handle.join().expect("mock server thread panicked");
+
+        assert!(
+            result.is_ok(),
+            "colon-style path param should be substituted, not rejected as missing: {result:?}"
+        );
+        let request_line = rx
+            .recv()
+            .expect("mock server should have received a request");
+        assert!(
+            request_line.contains("/users/42"),
+            "expected substituted path '/users/42' in request line, got: {request_line}"
+        );
+        assert!(
+            !request_line.contains(":id"),
+            "colon-style placeholder must not leak into the request path: {request_line}"
+        );
     }
 
     #[tokio::test]
