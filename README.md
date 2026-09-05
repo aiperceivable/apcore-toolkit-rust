@@ -34,11 +34,16 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `filter_modules` | Regex-based include/exclude filtering for scanned modules |
 | `deduplicate_ids` | Resolves duplicate module IDs by appending `_2`, `_3`, etc. |
 | `infer_annotations_from_method` | Maps HTTP methods to behavioral `ModuleAnnotations` |
+| `OpenAPIScanner` | Scans an OpenAPI spec into `ScannedModule` values; configured via `ScanOptions` (hooks: `DeriveModuleIdHook`, `TransformOperationHook`, `TransformModuleHook`) |
+| `ScanOptions` / `ScannerError` | Configuration struct and `thiserror`-derived error enum for `OpenAPIScanner` |
+| `derive_module_id` | Default module-ID derivation strategy for an OpenAPI operation (path + method) |
+| `load_spec` / `load_spec_with_options` | Loads an OpenAPI spec document from a file or URL (feature: `http-proxy`) |
 | `YAMLWriter` | Generates `.binding.yaml` files for `apcore::BindingLoader` |
 | `BindingLoader` | Parses `.binding.yaml` files back into `ScannedModule` values (pure-data inverse of `YAMLWriter`, with loose/strict modes) |
 | `BindingLoadError` | `thiserror`-derived error enum: `PathNotFound`, `FileRead`, `FileTooLarge`, `TooManyFiles`, `YamlParse`, `MissingFields`, `InvalidStructure` |
 | `RegistryWriter` | Registers modules directly into an `apcore::Registry` with pluggable `HandlerFactory` |
 | `HTTPProxyRegistryWriter` | Registers HTTP proxy modules that forward requests to a running API (feature: `http-proxy`) |
+| `RustWriter` | Generates Rust handler stub files — the language-native counterpart to Python's `PythonWriter` / TypeScript's `TypeScriptWriter` |
 | `assert_annotations_preserved` | Conformance check for adapter tests: registers a module and asserts its behavioral annotations (`requires_approval` / `destructive`) survive `get_definition`; panics otherwise. Guards against a writer silently disabling approval/ACL gating |
 | `Enhancer` | Pluggable trait for metadata enhancement |
 | `AIEnhancer` | SLM-based metadata enhancement for scanned modules |
@@ -53,6 +58,14 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | `to_markdown` | Converts JSON objects to Markdown with depth control and table heuristics |
 | `format_csv` _(v0.7.0)_ | Byte-equivalent RFC 4180 CSV emitter — header = union of keys; canonical JSON for nested cells; CRLF terminator |
 | `format_jsonl` _(v0.7.0)_ | Byte-equivalent JSON Lines emitter — canonical compact JSON per row, LF terminator |
+| `format_module` / `format_schema` | Surface-aware formatters for a `ScannedModule` / JSON Schema — styles: `ModuleStyle` (`Markdown`, `Skill`, `TableRow`, `Json`) / `SchemaStyle` (`Prose`, `Table`, `Json`); see also `format_modules`, `FormatOutput`, `FormatError` |
+| `TuiViewModel` | Tier-1 byte-equivalent module-list view-model wire format, shared across the Python/TypeScript/Rust SDKs |
+| `modules_to_view_model` | Builds a `TuiViewModel` from `&[ScannedModule]` per `ModulesToViewModelOptions` |
+| `format_view_model` | Canonical, byte-identical compact-JSON encoding of a `TuiViewModel` |
+| `ModulesToViewModelOptions` | Configuration for `modules_to_view_model` (view kind, columns, filter, sort, grouping, tone rules) |
+| `Column` / `Cell` | View-model column definitions and per-row cell values |
+| `Sort` / `Filter` / `Group` | Applied-sort, applied-filter, and group-bucket metadata carried on a `TuiViewModel` |
+| `ViewGroupBy` | Group-by axis for grouped view models |
 | `enrich_schema_descriptions` | Merges descriptions into JSON Schema properties |
 | `DisplayResolver` | Sparse binding.yaml overlay — resolves alias, description, guidance, tags into `metadata["display"]` |
 | `SyntaxVerifier` | Verifies Rust source files parse without syntax errors (via `syn`) |
