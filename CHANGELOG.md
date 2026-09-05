@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [0.11.0] - 2026-09-04
+## [0.11.0] - 2026-09-05
 
 Feature release: ships `OpenAPIScanner` and `TuiViewModel`, version-aligned with the Python and TypeScript SDKs. Also fixes two pre-existing `HTTPProxyRegistryWriter` defects that this release's `OpenAPIScanner` makes reachable in normal use.
 
@@ -12,6 +12,10 @@ Feature release: ships `OpenAPIScanner` and `TuiViewModel`, version-aligned with
 - **`OpenAPIScanner`, `derive_module_id`, `ScannerError`, `ScanOptions`, `load_spec`** (`src/openapi_scanner.rs`; `load_spec` behind the `http-proxy` feature) — turn an OpenAPI 3.0/3.1 document into a `Vec<ScannedModule>`, one module per operation. `OpenAPIScanner` is a standalone struct rather than a `BaseScanner` impl — the trait's fixed single-argument, infallible-return shape doesn't fit multiple named options plus a fallible spec-validation path; it reuses the trait's free functions (`filter_modules`, `deduplicate_ids`, `infer_annotations_from_method`) directly instead. See the note in `docs/features/openapi-scanner.md` and tracked issue #4.
 - **`TuiViewModel`, `Column`, `Row`, `Cell`, `Sort`, `Filter`, `TonePalette`, `ToneRule`, `Group`, `ViewGroupBy`, `ModulesToViewModelOptions`, `modules_to_view_model`, `format_view_model`** (`src/tui_view_model.rs`) — byte-equivalent module-list view-model builder and canonical JSON encoder.
 - 37 new tests: 35 conformance cases against the shared corpus in `apcore-toolkit/conformance/fixtures/` (`tests/openapi_scan_conformance.rs`, `tests/view_model_conformance.rs`) plus 2 `HTTPProxyRegistryWriter` regression tests for the fixes below.
+
+### Changed
+
+- **Required `apcore` floor raised to `0.29`.** apcore-rust 0.29.0 carries three BREAKING changes, all in the client and ACL governance layer: `APCore::on` / `on_subscriber` / `on_fn` / `off` / `off_by_type` now return `Result` and error with `SYS_MODULES_DISABLED` when the client has no event bus; the ACL pattern-array shape is closed at every entry point (`ACL::load` / `try_new` / `try_add_rule` refuse `[]`, `["$or"]`, `["$not"]` and the multi-operand `["$not", p1, p2]`, with the infallible `ACL::new` / `add_rule` panicking, [apcore#112](https://github.com/aiperceivable/apcore/issues/112)); and `ACLRule` became `#[non_exhaustive]`, so downstream struct-literal construction — `..Default::default()` included — no longer compiles. None of it reaches this crate: the toolkit's complete apcore surface is `Registry`, `Module`, `ModuleAnnotations`, `ModuleExample`, `ModuleDescriptor`, `FunctionModule`, `Context`, `ModuleError` / `ErrorCode`, `ChunkStream` and `StreamingModule` (confirmed by grepping every `use apcore` / `apcore::` path in `src/`); it constructs no `ACLRule` and holds no `APCore` client. No code or API changes, and all tests pass unmodified against apcore 0.29.0.
 
 ### Fixed
 
