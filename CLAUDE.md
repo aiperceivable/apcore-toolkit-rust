@@ -48,7 +48,10 @@
 
 ### Async
 
-- Runtime: **Tokio** (`features = ["full"]`).
+- The crate itself has **no async-runtime dependency** — consumers bring their own
+  runtime (e.g. the README's quick-start example uses `#[tokio::main]`). `tokio` only
+  appears in `[dev-dependencies]`, scoped to `features = ["rt", "macros", "net", "time"]`
+  for driving async integration tests; it is not a runtime dependency of the crate.
 - Traits with async methods: use **`async-trait`**.
 
 ### Logging
