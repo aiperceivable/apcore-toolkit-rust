@@ -13,9 +13,16 @@ If you're building an APCore adapter for a Rust web framework, this crate provid
 ```toml
 [dependencies]
 apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust" }
+```
 
-# Optional: HTTP proxy writer
-apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust", features = ["http-proxy"] }
+`http-proxy` (which provides `HTTPProxyRegistryWriter`) is a **default** feature, so
+the plain dependency line above already includes it — matching the public surface of
+the Python and TypeScript SDKs. To opt out and drop the `reqwest` dependency for a
+leaner build:
+
+```toml
+[dependencies]
+apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust", default-features = false }
 ```
 
 ## Core Modules
@@ -249,7 +256,7 @@ See `apcore-toolkit/docs/features/formatting.md` § Tabular Formats for the full
 
 | Feature | Description |
 |---------|-------------|
-| `http-proxy` | Enables `HTTPProxyRegistryWriter` (adds `reqwest` dependency) |
+| `http-proxy` | **Enabled by default.** Provides `HTTPProxyRegistryWriter` (adds the `reqwest` dependency). Disable with `default-features = false` for a leaner build. |
 
 ## Documentation
 
