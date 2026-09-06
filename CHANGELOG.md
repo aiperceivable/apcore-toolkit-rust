@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.11.1] - 2026-09-06
+
+Patch release. Bumps the required `apcore` floor to `0.30`. apcore 0.30.0 is confined to `Config`/`BindingLoader`: `bindings.dir`/`bindings.pattern` become canonical defaults, a set-but-empty path-typed `APCORE_*` override is now discarded rather than resolving to the working directory, and the §9.2.2 deprecation-warning cadence is now spec-normative (behaviour unchanged). None of it reaches this crate — the toolkit's complete apcore surface is `Registry`, `Module`, `ModuleAnnotations`, `ModuleExample`, `ModuleDescriptor`, `FunctionModule`, `Context`, `ModuleError` / `ErrorCode`, `ChunkStream` and `StreamingModule` (confirmed by grepping every `use apcore` / `apcore::` path in `src/`; the sole `apcore::BindingLoader` reference is a doc comment noting output-file compatibility, not a code dependency). No code or API changes; all tests pass unmodified against apcore 0.30.0 (485 lib + 13 integration + 8 doc tests). `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` clean.
+
 ## [0.11.0] - 2026-09-05
 
 Feature release: ships `OpenAPIScanner` and `TuiViewModel`, version-aligned with the Python and TypeScript SDKs. Also fixes two pre-existing `HTTPProxyRegistryWriter` defects that this release's `OpenAPIScanner` makes reachable in normal use.
