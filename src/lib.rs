@@ -45,6 +45,8 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod ai_enhancer;
+#[cfg(feature = "device-auth")]
+pub mod auth;
 pub mod binding_loader;
 pub mod conformance;
 pub mod display;
@@ -62,7 +64,10 @@ pub mod types;
 
 // Re-export primary types at crate root for convenience.
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
-pub use binding_loader::{BindingLoadError, BindingLoader};
+pub use binding_loader::{
+    match_binding_pattern, validate_binding_pattern, BindingLoadError, BindingLoader,
+    DEFAULT_BINDING_PATTERN,
+};
 pub use conformance::assert_annotations_preserved;
 pub use display::{DisplayResolver, DisplayResolverError};
 pub use formatting::{
@@ -105,3 +110,12 @@ pub use types::{clone_module, create_scanned_module, ScannedModule};
 pub use openapi_scanner::{load_spec, load_spec_with_options, LoadSpecError, LoadSpecOptions};
 #[cfg(feature = "http-proxy")]
 pub use output::http_proxy_writer::{HTTPProxyRegistryWriter, HTTPProxyRegistryWriterError};
+
+// RFC 8628 device authorization flow. Only the names a consumer needs to build
+// and drive a flow are lifted to the crate root; the rest stay reachable under
+// `apcore_toolkit::auth::*`, matching how `output::*` is exported.
+#[cfg(feature = "device-auth")]
+pub use auth::{
+    DeviceAuthClient, DeviceAuthConfig, DeviceAuthError, DeviceCodeGrant, FileTokenStore, Grant,
+    LoginCallbacks, PollEvent, TokenSet, TokenStore, TokenStoreError, UserCodeEvent,
+};

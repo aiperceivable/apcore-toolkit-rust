@@ -3,6 +3,44 @@
 All notable changes to this project will be documented in this file.
 
 
+## [0.13.0] - unreleased
+
+Adds the **RFC 8628 Device Authorization Flow client** ([apcore-toolkit#17](https://github.com/aiperceivable/apcore-toolkit/issues/17)) — the protocol half only. The toolkit writes nothing to a terminal: it emits events, and the consumer renders them.
+
+### Added
+
+- **`DeviceAuthClient`, `DeviceAuthConfig`, `TokenSet`, `TokenStore`, `FileTokenStore`, `Grant` / `DeviceCodeGrant`**, and the four extension hooks. See [`docs/features/device-auth.md`](https://github.com/aiperceivable/apcore-toolkit/blob/main/docs/features/device-auth.md). Gated behind a new `device-auth` cargo feature. `cargo check --no-default-features` is asserted: the feature adds **no** new `reqwest` or `tokio` edge to that build (the ones present arrive via `apcore` → `jsonschema` and predate this work), so `apexe`, which depends on this crate with `default-features = false`, is untouched.
+- Asserted against the shared **65-case** corpus (`conformance/fixtures/device_auth.json`). **No HTTP mocking is required**: the state machine is pure over an injected monotonic clock and a scripted response sequence.
+- **V1 is device flow only**, with the `Grant` interface in place so a second grant is one implementation against a stable seam rather than a rewrite. A deliberate scope-down from the proposal's own recommendation — PKCE widens the exact surface whose risk mitigation depends on being narrow, and no consumer has yet named a provider lacking device-flow support.
+
+### Notes
+
+Tokens persist to `~/.config/apcore/credentials.json` (`%APPDATA%\apcore\` on Windows), `0600`, written by atomic replace, keyed by issuer and client id. The path is normative rather than per-SDK precisely so that tools maintaining credential baselines can protect it — `apexe` has added it to its own.
+
+**624 tests pass across 11 binaries** (506 at 0.11.1). `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` clean.
+
+---
+
+## [0.12.0] - unreleased
+
+Closes a latent spec gap in `BindingLoader` ([apcore-toolkit#18](https://github.com/aiperceivable/apcore-toolkit/issues/18)).
+
+### Added
+
+- **`BindingLoader.load` honours a caller-supplied `pattern`.** apcore 0.30 made `bindings.pattern` a canonical configuration default, but this loader hardcoded the value and had no parameter through which a caller could pass a configured one — so a consumer that needs the loader's *return value*, rather than apcore's registration side effect, silently dropped the key. `apexe` is exactly that consumer: it loads `.binding.yaml` into `ScannedModule`, converts each into its own `CliModule`, and could not call apcore's config-aware loader without bypassing every control `CliModule` exists to apply. `load` keeps its three-argument arity — changing it would break every existing caller, `apexe` included — and delegates to a new `load_with_pattern(path, strict, recursive, pattern: Option<&str>)`. This is the two-tier shape `apcore` already uses for `load_binding_dir` / `load_binding_dir_with_config`. A new `BindingLoadError::InvalidPattern { pattern, reason }` is the eighth variant.
+- The loader takes the resolved value and does **not** read `Config` itself, keeping the pure-data layer dependency-free and leaving the environment > file > default precedence chain with the caller that actually holds a `Config`.
+- **`conformance/fixtures/binding_pattern.json`** (43 shared cases) pins the matcher, the rejected patterns, and how `pattern` composes with `recursive`. The spec carries the matching **algorithm** in pseudocode, not just the syntax — three independent implementations converge only if the algorithm is fixed.
+
+### Changed
+
+- **Directories are never candidates**, at every depth. A directory whose *name* matched was previously handed to the YAML reader. The file-type check **follows symlinks**, so a symlinked binding file is still selected while a symlinked directory is neither selected nor descended into, and a dangling link is skipped rather than aborting the load.
+
+### Notes
+
+`pattern` matches the **file name** only. `*` and `?` are the only metacharacters; `[`, `]`, `{`, `}` are literals, because character classes and brace expansion are where language glob implementations diverge. A pattern containing `/` or `\` is rejected before any filesystem access — which makes `**/*.binding.yaml` a diagnostic rather than a mystery, since traversal depth is `recursive`'s job.
+
+**624 tests pass across 11 binaries** (506 at 0.11.1). `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` clean.
+
 ## [0.11.1] - 2026-09-06
 
 Patch release. Bumps the required `apcore` floor to `0.30`. apcore 0.30.0 is confined to `Config`/`BindingLoader`: `bindings.dir`/`bindings.pattern` become canonical defaults, a set-but-empty path-typed `APCORE_*` override is now discarded rather than resolving to the working directory, and the §9.2.2 deprecation-warning cadence is now spec-normative (behaviour unchanged). None of it reaches this crate — the toolkit's complete apcore surface is `Registry`, `Module`, `ModuleAnnotations`, `ModuleExample`, `ModuleDescriptor`, `FunctionModule`, `Context`, `ModuleError` / `ErrorCode`, `ChunkStream` and `StreamingModule` (confirmed by grepping every `use apcore` / `apcore::` path in `src/`; the sole `apcore::BindingLoader` reference is a doc comment noting output-file compatibility, not a code dependency). No code or API changes; all tests pass unmodified against apcore 0.30.0 (485 lib + 13 integration + 8 doc tests). `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` clean.

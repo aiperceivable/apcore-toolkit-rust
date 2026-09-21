@@ -1,6 +1,6 @@
 [package]
 name = "apcore-toolkit"
-version = "0.11.1"
+version = "0.13.0"
 edition = "2021"
 description = "Shared scanner, schema extraction, and output toolkit for apcore framework adapters"
 license = "Apache-2.0"
@@ -46,13 +46,29 @@ version = "0.12"
 features = ["json"]
 optional = true
 
+# Test-only in spirit, runtime-only under `device-auth`: the default injected
+# sleep for the RFC 8628 polling state machine needs a real async timer. Only
+# the `time` feature is required, and `reqwest` already pulls `tokio` into the
+# tree, so this adds no new dependency to a build that already has `reqwest`.
+[dependencies.tokio]
+version = "1"
+features = ["time"]
+optional = true
+default-features = false
+
 [features]
 # `http-proxy` is enabled by default so a vanilla `cargo add apcore-toolkit`
 # exposes the same public API surface (`HTTPProxyRegistryWriter`) as the
 # Python and TypeScript SDKs. Consumers who want a lean default build that
 # omits the `reqwest` dependency can opt out with `default-features = false`.
-default = ["http-proxy"]
+#
+# `device-auth` follows the same rule for the same reason: the Python and
+# TypeScript SDKs export `DeviceAuthClient` unconditionally, so a vanilla
+# `cargo add apcore-toolkit` must too. `default-features = false` still yields
+# a build with neither `reqwest` nor `tokio`.
+default = ["http-proxy", "device-auth"]
 http-proxy = ["dep:reqwest"]
+device-auth = ["dep:reqwest", "dep:tokio"]
 
 [lints.clippy]
 # Match the project's pre-commit gate (Makefile + hooks/) — block warnings

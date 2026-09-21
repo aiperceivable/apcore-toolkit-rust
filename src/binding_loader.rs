@@ -42,6 +42,11 @@ const MAX_BINDING_FILE_SIZE: u64 = 16 * 1024 * 1024;
 /// consumption in `load_data` callers that accumulate results.
 const MAX_BINDING_FILES_PER_DIR: usize = 10_000;
 
+/// Default value of the `bindings.pattern` configuration key
+/// (`apcore` `schemas/defaults.schema.json`), used when a caller passes
+/// `None` to [`BindingLoader::load_with_pattern`].
+pub const DEFAULT_BINDING_PATTERN: &str = "*.binding.yaml";
+
 /// Errors produced by [`BindingLoader`].
 #[derive(Debug, Error)]
 pub enum BindingLoadError {
@@ -87,6 +92,22 @@ pub enum BindingLoadError {
         missing_fields: Vec<String>,
     },
 
+    /// The file-name `pattern` supplied to
+    /// [`BindingLoader::load_with_pattern`] is not usable. Raised before any
+    /// filesystem access, so an invalid pattern is a diagnostic rather than a
+    /// silently empty result.
+    ///
+    /// The shared conformance corpus
+    /// (`conformance/fixtures/binding_pattern.json`) pins two stable
+    /// identifiers; `reason` carries the idiomatic Rust phrasing of each:
+    ///
+    /// | Identifier | `reason` |
+    /// |---|---|
+    /// | `empty_pattern` | `pattern must not be empty` |
+    /// | `path_separator` | `pattern matches file names only; ...` |
+    #[error("invalid binding pattern {pattern:?}: {reason}")]
+    InvalidPattern { pattern: String, reason: String },
+
     /// The document structure is invalid (e.g. top-level is not a mapping,
     /// or `bindings` is not a list).
     #[error("invalid binding structure in {}: {reason}", .path.as_deref().unwrap_or("<inline>"))]
@@ -94,6 +115,108 @@ pub enum BindingLoadError {
         path: Option<String>,
         reason: String,
     },
+}
+
+/// Reason text for a rejected empty pattern (conformance id `empty_pattern`).
+const REASON_EMPTY_PATTERN: &str = "pattern must not be empty";
+
+/// Reason text for a rejected pattern containing a path separator
+/// (conformance id `path_separator`).
+const REASON_PATH_SEPARATOR: &str =
+    "pattern matches file names only; use recursive=true to descend into subdirectories";
+
+/// Match a binding file **name** against a `bindings.pattern` glob.
+///
+/// This is the normative matcher shared by the Python, TypeScript, and Rust
+/// SDKs — see `docs/features/binding-loader.md#normative-matching-algorithm`
+/// and the shared fixture `conformance/fixtures/binding_pattern.json`.
+///
+/// Exactly two metacharacters are recognised:
+///
+/// | Token | Meaning |
+/// |---|---|
+/// | `*` | Zero or more characters, including `.` |
+/// | `?` | Exactly one character |
+/// | anything else | A literal, including `[`, `]`, `{`, `}`, `!`, `^`, `-` |
+///
+/// Character classes and brace expansion are deliberately **not** supported;
+/// matching is case-sensitive on every platform, applies no Unicode
+/// normalization, and does not exclude leading-dot names.
+///
+/// The implementation is the standard two-pointer glob match with
+/// single-star backtracking, which bounds the work at
+/// `O(pattern.len() * name.len())` — the naive recursive matcher is
+/// exponential on inputs such as `*a*a*a*a*b`, and `pattern` arrives from
+/// configuration.
+///
+/// Comparison is over Unicode **code points**, not bytes: both inputs are
+/// collected into `char` vectors first, so a single astral character is
+/// consumed by exactly one `?`.
+pub fn match_binding_pattern(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let nam: Vec<char> = name.chars().collect();
+
+    // Cursors into `pat` and `nam`.
+    let mut p: usize = 0;
+    let mut n: usize = 0;
+    // Position of the most recent `*`, and where to resume `nam` when
+    // backtracking into it.
+    let mut star: Option<usize> = None;
+    let mut mark: usize = 0;
+
+    while n < nam.len() {
+        if p < pat.len() && pat[p] == '?' {
+            p += 1;
+            n += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            // Consume zero characters for now; widen on backtrack.
+            star = Some(p);
+            mark = n;
+            p += 1;
+        } else if p < pat.len() && pat[p] == nam[n] {
+            p += 1;
+            n += 1;
+        } else if let Some(star_pos) = star {
+            // Let the most recent `*` eat one more character.
+            p = star_pos + 1;
+            mark += 1;
+            n = mark;
+        } else {
+            return false;
+        }
+    }
+
+    // Trailing stars may match nothing.
+    while p < pat.len() && pat[p] == '*' {
+        p += 1;
+    }
+
+    p == pat.len()
+}
+
+/// Validate a `bindings.pattern` value before it reaches the filesystem.
+///
+/// Two shapes are rejected:
+///
+/// - an empty pattern, which is neither match-nothing nor match-everything;
+/// - a pattern containing `/` or `\` on **every** platform, because
+///   `pattern` matches file names only — traversal depth is `recursive`'s
+///   job. This is what makes `**/*.binding.yaml` a diagnostic rather than a
+///   mystery.
+pub fn validate_binding_pattern(pattern: &str) -> Result<(), BindingLoadError> {
+    if pattern.is_empty() {
+        return Err(BindingLoadError::InvalidPattern {
+            pattern: pattern.to_string(),
+            reason: REASON_EMPTY_PATTERN.to_string(),
+        });
+    }
+    if pattern.contains('/') || pattern.contains('\\') {
+        return Err(BindingLoadError::InvalidPattern {
+            pattern: pattern.to_string(),
+            reason: REASON_PATH_SEPARATOR.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Loads `.binding.yaml` files into [`ScannedModule`] objects.
@@ -104,6 +227,15 @@ pub enum BindingLoadError {
 /// let loader = BindingLoader;
 /// let modules = loader.load(Path::new("bindings/"), false, false)?;
 /// let strict = loader.load(Path::new("foo.binding.yaml"), true, false)?;
+///
+/// // Honour a configured `bindings.pattern` — the caller resolves, the
+/// // loader matches.
+/// let cli = loader.load_with_pattern(
+///     Path::new("bindings/"),
+///     false,
+///     true,
+///     Some("api-*.cli.yaml"),
+/// )?;
 /// ```
 ///
 /// In loose mode (`strict=false`, default), only `module_id` and `target`
@@ -120,10 +252,58 @@ impl BindingLoader {
         Self
     }
 
-    /// Load one file or every `*.binding.yaml` in a directory.
+    /// Load one file or every [`DEFAULT_BINDING_PATTERN`] match in a directory.
     ///
-    /// When `recursive` is `true`, subdirectories are traversed depth-first using
-    /// `walkdir`. When `false` (default), only the immediate directory is scanned.
+    /// Delegates to [`BindingLoader::load_with_pattern`] with `pattern = None`.
+    /// Kept at three arguments so existing callers keep compiling; this is the
+    /// same two-tier shape `apcore` uses for `load_binding_dir` /
+    /// `load_binding_dir_with_config`.
+    pub fn load(
+        &self,
+        path: &Path,
+        strict: bool,
+        recursive: bool,
+    ) -> Result<Vec<ScannedModule>, BindingLoadError> {
+        self.load_with_pattern(path, strict, recursive, None)
+    }
+
+    /// Load one file, or every file in a directory whose **name** matches
+    /// `pattern`.
+    ///
+    /// `pattern` is the resolved value of `apcore`'s `bindings.pattern`
+    /// configuration key; `None` selects [`DEFAULT_BINDING_PATTERN`]. The
+    /// loader takes a value and does not read a `Config` itself —
+    /// environment > file > default resolution belongs to the caller, which
+    /// is the layer that holds the `Config`. See
+    /// [`match_binding_pattern`] for the supported syntax.
+    ///
+    /// `pattern` and `recursive` are orthogonal: `recursive` governs **which
+    /// directories are traversed**, `pattern` governs **which file names
+    /// match** at whatever depth traversal reached. A caller never writes a
+    /// `**/` prefix and the loader never synthesises one. When `path` names a
+    /// file, `pattern` is ignored for *matching* — exactly like `recursive` —
+    /// but it is still *validated*: validation is a pure precondition on the
+    /// argument, not a step of the directory walk.
+    ///
+    /// Directories are never candidates at any depth: a directory whose name
+    /// matches `pattern` is skipped, not selected and then failed on at read
+    /// time. The file-type check **follows symlinks** — a symlink to a regular
+    /// file is selected, a broken symlink is skipped like any non-file.
+    /// Traversal still does not descend into a symlinked *directory*, so such
+    /// a link is neither selected nor walked.
+    ///
+    /// Matched files are sorted lexicographically by path before parsing, the
+    /// directory load stays all-or-nothing, and the safety caps still apply to
+    /// the matched set. `pattern` narrows *which* files are read; it changes
+    /// nothing about how they are read.
+    ///
+    /// # Errors
+    ///
+    /// [`BindingLoadError::InvalidPattern`] when `pattern` is empty or
+    /// contains a path separator. Validation runs **before** any filesystem
+    /// access — before the file/directory probe on `path` — so an invalid
+    /// pattern outranks [`BindingLoadError::PathNotFound`] and is reported
+    /// even when `path` names a single file.
     ///
     /// # OS error handling vs. TypeScript
     ///
@@ -131,12 +311,20 @@ impl BindingLoader {
     /// permission errors (EACCES/EPERM), this implementation propagates any IO error
     /// as `BindingLoadError::FileRead` and aborts the entire load. This is the
     /// fail-fast behavior.
-    pub fn load(
+    pub fn load_with_pattern(
         &self,
         path: &Path,
         strict: bool,
         recursive: bool,
+        pattern: Option<&str>,
     ) -> Result<Vec<ScannedModule>, BindingLoadError> {
+        let pattern: &str = pattern.unwrap_or(DEFAULT_BINDING_PATTERN);
+        // A pure precondition on the argument: validated before any filesystem
+        // access — including the `is_file()` / `is_dir()` probe below — so an
+        // invalid pattern is a diagnostic rather than a silently empty result,
+        // outranks `PathNotFound`, and is reported even for a single file.
+        validate_binding_pattern(pattern)?;
+
         let files: Vec<PathBuf> = if path.is_file() {
             vec![path.to_path_buf()]
         } else if path.is_dir() {
@@ -157,11 +345,20 @@ impl BindingLoader {
                             source: io_err,
                         }
                     })?;
-                    if entry.file_type().is_file()
-                        && entry
-                            .file_name()
-                            .to_string_lossy()
-                            .ends_with(".binding.yaml")
+                    // Directories are never candidates. The file-type
+                    // check follows symlinks — `Path::is_file` stats the
+                    // target — so a symlink to a regular file is selected,
+                    // while a symlink to a directory and a broken symlink
+                    // (whose stat fails) are not. `DirEntry::file_type()`
+                    // would report on the link itself and silently drop every
+                    // symlinked binding file.
+                    //
+                    // Following file symlinks is not following directory
+                    // symlinks: `follow_links(false)` above stays, so
+                    // traversal never descends into a symlinked directory,
+                    // which is where cycles and tree-escape live.
+                    if match_binding_pattern(pattern, &entry.file_name().to_string_lossy())
+                        && entry.path().is_file()
                     {
                         flat.push(entry.into_path());
                     }
@@ -177,11 +374,16 @@ impl BindingLoader {
                     match entry_result {
                         Ok(entry) => {
                             let p = entry.path();
-                            let is_binding = p
+                            let name_matches = p
                                 .file_name()
                                 .and_then(|n| n.to_str())
-                                .is_some_and(|n| n.ends_with(".binding.yaml"));
-                            if is_binding {
+                                .is_some_and(|n| match_binding_pattern(pattern, n));
+                            // Directories are never candidates: a directory
+                            // named `x.binding.yaml` is skipped rather than
+                            // selected and then failed on at read time. Same
+                            // following-stat rule as the recursive branch —
+                            // test the target, not the link.
+                            if name_matches && p.is_file() {
                                 flat.push(p);
                             }
                         }
@@ -1097,5 +1299,449 @@ mod tests {
         let mut rec_ids: Vec<&str> = recursive.iter().map(|m| m.module_id.as_str()).collect();
         rec_ids.sort();
         assert_eq!(rec_ids, vec!["root.mod", "sub.mod"]);
+    }
+
+    // ---- Pattern matching (docs/features/binding-loader.md#pattern-matching) ----
+
+    #[test]
+    fn test_match_binding_pattern_star_semantics() {
+        // `*` crosses `.`, matches zero characters, and does not exclude
+        // leading-dot names.
+        assert!(match_binding_pattern(
+            "*.binding.yaml",
+            "users.binding.yaml"
+        ));
+        assert!(match_binding_pattern(
+            "*.binding.yaml",
+            "a.b.c.binding.yaml"
+        ));
+        assert!(match_binding_pattern("*.binding.yaml", ".binding.yaml"));
+        assert!(match_binding_pattern(
+            "*.binding.yaml",
+            ".hidden.binding.yaml"
+        ));
+        assert!(match_binding_pattern("*", "anything.at.all"));
+        assert!(!match_binding_pattern(
+            "*.binding.yaml",
+            "users.binding.yml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_multiple_stars_backtrack() {
+        assert!(match_binding_pattern(
+            "*-*.binding.yaml",
+            "api-v1.binding.yaml"
+        ));
+        assert!(!match_binding_pattern(
+            "*-*.binding.yaml",
+            "apiv1.binding.yaml"
+        ));
+        // `**` without a separator is just `*`; it is not globstar.
+        assert!(match_binding_pattern(
+            "**.binding.yaml",
+            "users.binding.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_question_is_exactly_one_char() {
+        assert!(match_binding_pattern("v?.binding.yaml", "v1.binding.yaml"));
+        assert!(!match_binding_pattern("v?.binding.yaml", "v.binding.yaml"));
+        assert!(!match_binding_pattern(
+            "v?.binding.yaml",
+            "v10.binding.yaml"
+        ));
+        // `?` matches a literal dot like any other character.
+        assert!(match_binding_pattern(
+            "a?b.binding.yaml",
+            "a.b.binding.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_metachars_are_literal() {
+        // Character classes and brace expansion are NOT supported.
+        assert!(!match_binding_pattern(
+            "[ab].binding.yaml",
+            "a.binding.yaml"
+        ));
+        assert!(match_binding_pattern(
+            "[ab].binding.yaml",
+            "[ab].binding.yaml"
+        ));
+        assert!(!match_binding_pattern(
+            "{a,b}.binding.yaml",
+            "a.binding.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_is_case_sensitive_and_anchored() {
+        assert!(!match_binding_pattern(
+            "*.binding.yaml",
+            "users.BINDING.yaml"
+        ));
+        assert!(!match_binding_pattern(
+            "API-*.binding.yaml",
+            "api-v1.binding.yaml"
+        ));
+        // A literal pattern is anchored at both ends, not a substring search.
+        assert!(match_binding_pattern(
+            "users.binding.yaml",
+            "users.binding.yaml"
+        ));
+        assert!(!match_binding_pattern(
+            "users.binding.yaml",
+            "old-users.binding.yaml"
+        ));
+        // No leading star means anchored at the start.
+        assert!(!match_binding_pattern(
+            ".binding.yaml",
+            "users.binding.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_iterates_unicode_code_points() {
+        // One `?` consumes one character, not one UTF-8 byte...
+        assert!(match_binding_pattern("?.binding.yaml", "é.binding.yaml"));
+        assert!(!match_binding_pattern("??", "é"));
+        // ...and not one UTF-16 code unit either: an astral character is a
+        // single `char`, so exactly one `?` consumes it.
+        assert!(match_binding_pattern(
+            "?.binding.yaml",
+            "\u{1F600}.binding.yaml"
+        ));
+        assert!(!match_binding_pattern(
+            "??.binding.yaml",
+            "\u{1F600}.binding.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_match_binding_pattern_is_not_exponential() {
+        // The naive recursive matcher would not return here.
+        let name = "a".repeat(64);
+        assert!(!match_binding_pattern("*a*a*a*a*b", &name));
+    }
+
+    // ---- Pattern validation (rejected before any filesystem access) ----
+
+    #[test]
+    fn test_validate_binding_pattern_rejects_empty() {
+        let err = validate_binding_pattern("").unwrap_err();
+        match err {
+            BindingLoadError::InvalidPattern { pattern, reason } => {
+                assert_eq!(pattern, "");
+                assert_eq!(reason, REASON_EMPTY_PATTERN);
+            }
+            other => panic!("expected InvalidPattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_binding_pattern_rejects_path_separator() {
+        for pattern in [
+            "sub/*.binding.yaml",
+            "**/*.binding.yaml",
+            "sub\\*.binding.yaml",
+            "*.binding.yaml/",
+        ] {
+            let err = validate_binding_pattern(pattern).unwrap_err();
+            match err {
+                BindingLoadError::InvalidPattern {
+                    pattern: got,
+                    reason,
+                } => {
+                    assert_eq!(got, pattern);
+                    assert_eq!(reason, REASON_PATH_SEPARATOR);
+                }
+                other => panic!("expected InvalidPattern for {pattern:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_load_with_pattern_rejects_bad_pattern_before_filesystem_access() {
+        // The path does not exist; the pattern error must still win, proving
+        // validation happens before any filesystem access.
+        let missing = Path::new("/definitely/does/not/exist/anywhere");
+        for bad in ["", "**/*.binding.yaml"] {
+            let err = BindingLoader::new()
+                .load_with_pattern(missing, false, false, Some(bad))
+                .unwrap_err();
+            assert!(
+                matches!(err, BindingLoadError::InvalidPattern { .. }),
+                "expected InvalidPattern for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_with_pattern_selects_custom_pattern() {
+        let dir = TempDir::new().unwrap();
+        let doc = |id: &str| {
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": id, "target": "pkg:f"}]}),
+            )
+            .unwrap()
+        };
+        fs::write(dir.path().join("api-v1.cli.yaml"), doc("api.v1")).unwrap();
+        fs::write(dir.path().join("web-v1.cli.yaml"), doc("web.v1")).unwrap();
+        fs::write(dir.path().join("api-v1.binding.yaml"), doc("api.binding")).unwrap();
+
+        let loader = BindingLoader::new();
+        let matched = loader
+            .load_with_pattern(dir.path(), false, false, Some("api-*.cli.yaml"))
+            .unwrap();
+        let ids: Vec<&str> = matched.iter().map(|m| m.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["api.v1"]);
+
+        // `None` means the default pattern, and `load` delegates with `None`.
+        let default_ids: Vec<String> = loader
+            .load_with_pattern(dir.path(), false, false, None)
+            .unwrap()
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        assert_eq!(default_ids, vec!["api.binding".to_string()]);
+        let via_load: Vec<String> = loader
+            .load(dir.path(), false, false)
+            .unwrap()
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        assert_eq!(via_load, default_ids);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_unreadable_real_file_still_fails_fast() {
+        // The fail-soft carve-out is the file-type probe alone: a dangling
+        // symlink is "not a file", not an error. A genuine read error on a
+        // real, matching file keeps the existing fail-fast policy — this
+        // pins that the softening did not widen.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let unreadable = dir.path().join("locked.binding.yaml");
+        fs::write(
+            &unreadable,
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "locked.mod", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Mode 0o000 does not stop root, and some CI images run as root.
+        // Probe directly rather than guessing, so this never fails spuriously.
+        let permissions_are_enforced = fs::read_to_string(&unreadable).is_err();
+        let result = BindingLoader::new().load(dir.path(), false, false);
+
+        // Restore before asserting so the TempDir can always clean up.
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+
+        if !permissions_are_enforced {
+            eprintln!("SKIP: file permissions are not enforced for this user");
+            return;
+        }
+        assert!(
+            matches!(result, Err(BindingLoadError::FileRead { .. })),
+            "expected FileRead on an unreadable real file, got {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_with_pattern_skips_dangling_symlink_in_both_branches() {
+        // A dangling symlink whose NAME matches is skipped, not read. The
+        // following stat that makes a symlinked file selectable returns false
+        // here instead of erroring, and that failure must be swallowed as
+        // "not a file" rather than escaping as `FileRead` and aborting the
+        // whole load. The recursive branch is the one that bites: with
+        // `follow_links(false)` walkdir yields the dangling link as an entry,
+        // and a guard phrased as "not a directory" would let it through.
+        let dir = TempDir::new().unwrap();
+        let doc = |id: &str| {
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": id, "target": "pkg:f"}]}),
+            )
+            .unwrap()
+        };
+
+        fs::write(dir.path().join("a.binding.yaml"), doc("a.mod")).unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("b.binding.yaml"), doc("b.mod")).unwrap();
+
+        // Targets intentionally never created — at the root and nested.
+        std::os::unix::fs::symlink(
+            dir.path().join("does-not-exist.binding.yaml"),
+            dir.path().join("dangling.binding.yaml"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            nested.join("does-not-exist.binding.yaml"),
+            nested.join("dangling.binding.yaml"),
+        )
+        .unwrap();
+
+        let loader = BindingLoader::new();
+
+        let flat: Vec<String> = loader
+            .load(dir.path(), false, false)
+            .expect("a dangling symlink must be skipped, not read")
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        assert_eq!(flat, vec!["a.mod".to_string()]);
+
+        let recursive: Vec<String> = loader
+            .load(dir.path(), false, true)
+            .expect("a dangling symlink must be skipped, not read")
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        assert_eq!(
+            recursive,
+            vec!["a.mod".to_string(), "b.mod".to_string()],
+            "sorted by path: a.binding.yaml before nested/b.binding.yaml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_with_pattern_follows_file_symlinks_but_not_directory_symlinks() {
+        // Test the target, not the link: a symlink to a regular file IS
+        // selected, while a symlink to a directory is neither selected nor
+        // descended into, and a broken symlink is skipped like any non-file.
+        let dir = TempDir::new().unwrap();
+        let doc = |id: &str| {
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": id, "target": "pkg:f"}]}),
+            )
+            .unwrap()
+        };
+
+        let real = dir.path().join("real.binding.yaml");
+        fs::write(&real, doc("real.mod")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("alias.binding.yaml")).unwrap();
+
+        let target_dir = dir.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(target_dir.join("inner.binding.yaml"), doc("inner.mod")).unwrap();
+        std::os::unix::fs::symlink(&target_dir, dir.path().join("link.binding.yaml")).unwrap();
+
+        std::os::unix::fs::symlink(
+            dir.path().join("nowhere"),
+            dir.path().join("broken.binding.yaml"),
+        )
+        .unwrap();
+
+        let loader = BindingLoader::new();
+
+        // Flat: the file symlink is followed; the directory symlink and the
+        // broken symlink are not candidates.
+        let mut flat: Vec<String> = loader
+            .load(dir.path(), false, false)
+            .expect("symlinks must not error")
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        flat.sort();
+        assert_eq!(flat, vec!["real.mod".to_string(), "real.mod".to_string()]);
+
+        // Recursive: the real directory is traversed normally, so the inner
+        // file appears exactly once — the symlinked directory is not walked.
+        let mut rec: Vec<String> = loader
+            .load(dir.path(), false, true)
+            .expect("symlinks must not error")
+            .iter()
+            .map(|m| m.module_id.clone())
+            .collect();
+        rec.sort();
+        assert_eq!(
+            rec,
+            vec![
+                "inner.mod".to_string(),
+                "real.mod".to_string(),
+                "real.mod".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_load_with_pattern_validates_even_when_path_is_a_file() {
+        // "Ignored for single files" governs MATCHING only, never validation:
+        // pattern validation is a pure precondition on the argument and runs
+        // before the file/directory probe.
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("one.binding.yaml");
+        fs::write(
+            &file,
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "one.mod", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(file.is_file());
+
+        for bad in ["", "**/*.yaml"] {
+            let err = BindingLoader::new()
+                .load_with_pattern(&file, false, false, Some(bad))
+                .unwrap_err();
+            assert!(
+                matches!(err, BindingLoadError::InvalidPattern { .. }),
+                "expected InvalidPattern for {bad:?} on a file path, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_with_pattern_skips_directory_named_like_a_match() {
+        // A directory whose name matches the pattern is not a candidate at any
+        // depth: no module, and no read-time error.
+        let dir = TempDir::new().unwrap();
+        let decoy = dir.path().join("decoy.binding.yaml");
+        fs::create_dir(&decoy).unwrap();
+        fs::write(decoy.join("inner.binding.yaml"), "not: [valid").unwrap();
+        fs::write(
+            dir.path().join("real.binding.yaml"),
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "real.mod", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let flat = BindingLoader::new()
+            .load_with_pattern(dir.path(), false, false, Some("*.binding.yaml"))
+            .expect("a directory named like a match must be skipped, not read");
+        let ids: Vec<&str> = flat.iter().map(|m| m.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["real.mod"]);
+    }
+
+    #[test]
+    fn test_load_with_pattern_ignored_for_single_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("odd-name.yaml");
+        fs::write(
+            &file,
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "odd.one", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let modules = BindingLoader::new()
+            .load_with_pattern(&file, false, false, Some("*.binding.yaml"))
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module_id, "odd.one");
     }
 }
