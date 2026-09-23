@@ -206,10 +206,17 @@ impl FileTokenStore {
     /// there is no window in which the file is world-readable.
     fn write_all(&self, records: &BTreeMap<String, TokenSet>) -> Result<(), TokenStoreError> {
         let directory = self.path.parent().unwrap_or_else(|| Path::new("."));
+        // Recorded before creating, so hardening below only ever applies to a
+        // directory this call brought into existence -- never to one the user
+        // may have deliberately configured with different permissions.
+        let created_directory = !directory.exists();
         std::fs::create_dir_all(directory).map_err(|source| TokenStoreError::Io {
             path: directory.display().to_string(),
             source,
         })?;
+        if created_directory {
+            harden_new_directory(directory)?;
+        }
 
         let text = serde_json::to_string_pretty(records).map_err(|e| TokenStoreError::Corrupt {
             path: self.path.display().to_string(),
@@ -227,6 +234,31 @@ impl FileTokenStore {
             }
         })
     }
+}
+
+/// Tighten a freshly created credentials directory to owner-only access
+/// (`0700`).
+///
+/// Only ever called for a directory this store just created: a pre-existing
+/// directory may have been deliberately configured by the user with
+/// different permissions (e.g. a shared config root), and is left untouched.
+#[cfg(unix)]
+fn harden_new_directory(directory: &Path) -> Result<(), TokenStoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).map_err(|source| {
+        TokenStoreError::Io {
+            path: directory.display().to_string(),
+            source,
+        }
+    })
+}
+
+/// On Windows the directory inherits the ACL of its parent (typically
+/// `%APPDATA%`), which is already user-scoped, so there is no mode to set.
+#[cfg(not(unix))]
+fn harden_new_directory(_directory: &Path) -> Result<(), TokenStoreError> {
+    Ok(())
 }
 
 /// Create `path` with owner-only permissions and write `text` to it.
@@ -474,6 +506,52 @@ mod tests {
         block_on(store.save("k", &token("t"))).expect("save");
         assert!(block_on(store.load("k")).expect("load").is_none());
         block_on(store.clear("k")).expect("clear");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_store_creates_new_credentials_directory_with_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("temp dir");
+        let credentials_dir = dir.path().join("nested").join("apcore");
+        let path = credentials_dir.join("credentials.json");
+        assert!(!credentials_dir.exists(), "directory must not pre-exist");
+        let store = FileTokenStore::at(&path);
+        block_on(store.save("k", &token("t1"))).expect("save");
+
+        let mode = std::fs::metadata(&credentials_dir)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "created directory mode was {mode:04o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_store_leaves_a_preexisting_directorys_permissions_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("temp dir");
+        let credentials_dir = dir.path().join("apcore");
+        std::fs::create_dir_all(&credentials_dir).expect("pre-create dir");
+        // Deliberately non-default: a user-configured shared directory.
+        std::fs::set_permissions(&credentials_dir, std::fs::Permissions::from_mode(0o750))
+            .expect("set permissions");
+        let path = credentials_dir.join("credentials.json");
+        let store = FileTokenStore::at(&path);
+        block_on(store.save("k", &token("t1"))).expect("save");
+
+        let mode = std::fs::metadata(&credentials_dir)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o750,
+            "pre-existing directory permissions must be left untouched, got {mode:04o}"
+        );
     }
 
     #[test]

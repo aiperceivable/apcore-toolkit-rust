@@ -48,9 +48,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apcore"
-version = "0.30.0"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e83a50c0710283651003d041b817abe9a87981aeed90f045217d9b4694409df"
+checksum = "1b38cb784b350347fd7bc8cdde52ae4b562ecc6d7b8529893988d36c879be6e2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -58,7 +58,6 @@ dependencies = [
  "dashmap",
  "futures-core",
  "futures-util",
- "glob",
  "jsonschema",
  "notify",
  "parking_lot",
@@ -76,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "apcore-toolkit"
-version = "0.13.0"
+version = "0.12.0"
 dependencies = [
  "apcore",
  "async-trait",
@@ -646,12 +645,6 @@ dependencies = [
  "wasip2",
  "wasip3",
 ]
-
-[[package]]
-name = "glob"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "h2"

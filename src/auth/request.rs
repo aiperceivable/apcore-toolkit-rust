@@ -59,6 +59,19 @@ pub fn refresh_params(refresh_token: &str) -> ParamMap {
     params
 }
 
+/// The base parameters for an RFC 7009 revocation request.
+///
+/// `token_type_hint` is optional per the RFC and, when given, is a hint only
+/// -- servers must still accept the token if the hint is wrong or absent.
+pub fn revoke_params(token: &str, token_type_hint: Option<&str>) -> ParamMap {
+    let mut params = ParamMap::new();
+    params.insert("token".to_string(), token.to_string());
+    if let Some(hint) = token_type_hint {
+        params.insert("token_type_hint".to_string(), hint.to_string());
+    }
+    params
+}
+
 /// Assemble one outbound request.
 ///
 /// Order of assembly, which is also the order the parameters appear in the
@@ -284,6 +297,35 @@ mod tests {
             request.headers.get("Accept").map(String::as_str),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn test_revoke_params_include_token_and_hint() {
+        let params = revoke_params("tok", Some("access_token"));
+        assert_eq!(params.get("token").map(String::as_str), Some("tok"));
+        assert_eq!(
+            params.get("token_type_hint").map(String::as_str),
+            Some("access_token")
+        );
+    }
+
+    #[test]
+    fn test_revoke_params_omit_hint_when_none() {
+        let params = revoke_params("tok", None);
+        assert!(!params.contains_key("token_type_hint"));
+    }
+
+    #[test]
+    fn test_prepare_revoke_request_carries_client_id_and_token() {
+        let config = DeviceAuthConfig::new("cid");
+        let request = prepare_request(
+            &config,
+            RequestKind::Revoke,
+            revoke_params("tok", Some("access_token")),
+        );
+        let body = decoded(&request);
+        assert!(body.contains(&("token".to_string(), "tok".to_string())));
+        assert!(body.contains(&("client_id".to_string(), "cid".to_string())));
     }
 
     #[test]

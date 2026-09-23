@@ -20,34 +20,6 @@ pub struct ResolvedTarget {
     pub qualname: String,
 }
 
-/// Validate and parse a target string in `module_path:qualname` format.
-///
-/// The last `:` in the string is used as the separator, matching the
-/// TypeScript implementation which supports prefixed module paths.
-///
-/// # Format
-///
-/// - Python style: `"my_package.my_module:MyClass"`
-/// - TypeScript style: `"./handlers/task:createTask"`
-/// - Rust style: `"my_crate::module:function_name"`
-///
-/// # Errors
-///
-/// Returns `Err` if:
-/// - The target string contains no `:` separator
-/// - The module path is empty
-/// - The qualname is empty
-/// - The module path or qualname contain invalid characters
-///
-/// # Examples
-///
-/// ```
-/// use apcore_toolkit::resolve_target::resolve_target;
-///
-/// let result = resolve_target("my_module:my_func").unwrap();
-/// assert_eq!(result.module_path, "my_module");
-/// assert_eq!(result.qualname, "my_func");
-/// ```
 /// Errors returned by [`resolve_target`].
 #[derive(Debug, Error)]
 pub enum ResolveTargetError {
@@ -107,6 +79,47 @@ fn validate_module_path(module_path: &str, target: &str) -> Result<(), ResolveTa
     Ok(())
 }
 
+/// Validate and parse a `module_path:qualname` target string.
+///
+/// The last `:` in `target` is used as the separator, matching the
+/// TypeScript implementation (which supports prefixed module paths such as
+/// `node:path:join`). Unlike the Python and TypeScript SDKs, this function
+/// does not perform any dynamic import/resolution — there is no runtime
+/// import mechanism in Rust — it only validates the format and returns the
+/// parsed `module_path` and `qualname` components for the caller to resolve
+/// however is appropriate (e.g. via a static registry).
+///
+/// # Format
+///
+/// - Python style: `"my_package.my_module:MyClass"`
+/// - TypeScript style: `"./handlers/task:createTask"`
+/// - Rust style: `"my_crate::module:function_name"`
+///
+/// # Arguments
+///
+/// * `target` - Target string in `module_path:qualname` format.
+///
+/// # Returns
+///
+/// A [`ResolvedTarget`] containing the `module_path` (everything before the
+/// last `:`) and `qualname` (everything after it) on success.
+///
+/// # Errors
+///
+/// Returns [`ResolveTargetError`] if the target string contains no `:`
+/// separator, the module path or qualname is empty, the qualname is not a
+/// valid identifier, or the module path contains invalid characters (e.g.
+/// control characters or `..` path traversal).
+///
+/// # Examples
+///
+/// ```
+/// use apcore_toolkit::resolve_target::resolve_target;
+///
+/// let result = resolve_target("my_module:my_func").unwrap();
+/// assert_eq!(result.module_path, "my_module");
+/// assert_eq!(result.qualname, "my_func");
+/// ```
 pub fn resolve_target(target: &str) -> Result<ResolvedTarget, ResolveTargetError> {
     let last_colon = target
         .rfind(':')

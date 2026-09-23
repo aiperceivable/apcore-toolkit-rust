@@ -81,10 +81,40 @@ pub fn deep_resolve_refs(schema: &Value, openapi_doc: &Value, depth: usize) -> V
         return schema.clone();
     }
 
-    // Direct $ref resolution
+    // Direct $ref resolution. The keys sitting BESIDE the `$ref` are merged
+    // back over the target rather than discarded: dropping them silently loses
+    // `x-sensitive`, which apcore reads off the *resolved* schema to decide
+    // what to redact, so a field the OpenAPI document marked sensitive reaches
+    // apcore carrying nothing to redact on. apcore closed the same hole in its
+    // own resolver as D-98 in 0.31.0; see docs/features/openapi.md.
     if let Some(ref_str) = schema.get("$ref").and_then(|v| v.as_str()) {
-        let resolved = resolve_ref(ref_str, openapi_doc);
-        return deep_resolve_refs(&resolved, openapi_doc, depth + 1);
+        let resolved =
+            deep_resolve_refs(&resolve_ref(ref_str, openapi_doc), openapi_doc, depth + 1);
+        let siblings: serde_json::Map<String, Value> = schema
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter(|(k, _)| k.as_str() != "$ref")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if siblings.is_empty() {
+            return resolved;
+        }
+        // Siblings are walked at the SAME depth: following the reference has
+        // already consumed a level and they are not a second hop.
+        let walked = deep_resolve_refs(&Value::Object(siblings), openapi_doc, depth);
+        let mut merged = match resolved {
+            Value::Object(m) => m,
+            other => return other,
+        };
+        if let Value::Object(w) = walked {
+            for (k, v) in w {
+                merged.insert(k, v);
+            }
+        }
+        return Value::Object(merged);
     }
 
     let mut result = schema.clone();

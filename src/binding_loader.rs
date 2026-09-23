@@ -92,22 +92,6 @@ pub enum BindingLoadError {
         missing_fields: Vec<String>,
     },
 
-    /// The file-name `pattern` supplied to
-    /// [`BindingLoader::load_with_pattern`] is not usable. Raised before any
-    /// filesystem access, so an invalid pattern is a diagnostic rather than a
-    /// silently empty result.
-    ///
-    /// The shared conformance corpus
-    /// (`conformance/fixtures/binding_pattern.json`) pins two stable
-    /// identifiers; `reason` carries the idiomatic Rust phrasing of each:
-    ///
-    /// | Identifier | `reason` |
-    /// |---|---|
-    /// | `empty_pattern` | `pattern must not be empty` |
-    /// | `path_separator` | `pattern matches file names only; ...` |
-    #[error("invalid binding pattern {pattern:?}: {reason}")]
-    InvalidPattern { pattern: String, reason: String },
-
     /// The document structure is invalid (e.g. top-level is not a mapping,
     /// or `bindings` is not a list).
     #[error("invalid binding structure in {}: {reason}", .path.as_deref().unwrap_or("<inline>"))]
@@ -116,14 +100,6 @@ pub enum BindingLoadError {
         reason: String,
     },
 }
-
-/// Reason text for a rejected empty pattern (conformance id `empty_pattern`).
-const REASON_EMPTY_PATTERN: &str = "pattern must not be empty";
-
-/// Reason text for a rejected pattern containing a path separator
-/// (conformance id `path_separator`).
-const REASON_PATH_SEPARATOR: &str =
-    "pattern matches file names only; use recursive=true to descend into subdirectories";
 
 /// Match a binding file **name** against a `bindings.pattern` glob.
 ///
@@ -192,31 +168,6 @@ pub fn match_binding_pattern(pattern: &str, name: &str) -> bool {
     }
 
     p == pat.len()
-}
-
-/// Validate a `bindings.pattern` value before it reaches the filesystem.
-///
-/// Two shapes are rejected:
-///
-/// - an empty pattern, which is neither match-nothing nor match-everything;
-/// - a pattern containing `/` or `\` on **every** platform, because
-///   `pattern` matches file names only — traversal depth is `recursive`'s
-///   job. This is what makes `**/*.binding.yaml` a diagnostic rather than a
-///   mystery.
-pub fn validate_binding_pattern(pattern: &str) -> Result<(), BindingLoadError> {
-    if pattern.is_empty() {
-        return Err(BindingLoadError::InvalidPattern {
-            pattern: pattern.to_string(),
-            reason: REASON_EMPTY_PATTERN.to_string(),
-        });
-    }
-    if pattern.contains('/') || pattern.contains('\\') {
-        return Err(BindingLoadError::InvalidPattern {
-            pattern: pattern.to_string(),
-            reason: REASON_PATH_SEPARATOR.to_string(),
-        });
-    }
-    Ok(())
 }
 
 /// Loads `.binding.yaml` files into [`ScannedModule`] objects.
@@ -297,13 +248,12 @@ impl BindingLoader {
     /// the matched set. `pattern` narrows *which* files are read; it changes
     /// nothing about how they are read.
     ///
-    /// # Errors
+    /// # Pattern validity
     ///
-    /// [`BindingLoadError::InvalidPattern`] when `pattern` is empty or
-    /// contains a path separator. Validation runs **before** any filesystem
-    /// access — before the file/directory probe on `path` — so an invalid
-    /// pattern outranks [`BindingLoadError::PathNotFound`] and is reported
-    /// even when `path` names a single file.
+    /// Every string is a valid pattern; this never returns an error for a
+    /// syntactic reason. `/`, `\`, `[`, `]`, `{` and `}` are literals, so an
+    /// odd pattern simply matches no file name. Matches apcore's Algorithm
+    /// A25 requirement 2 (PROTOCOL_SPEC §9.2.3) and §5.12.6 clause 6.
     ///
     /// # OS error handling vs. TypeScript
     ///
@@ -319,12 +269,6 @@ impl BindingLoader {
         pattern: Option<&str>,
     ) -> Result<Vec<ScannedModule>, BindingLoadError> {
         let pattern: &str = pattern.unwrap_or(DEFAULT_BINDING_PATTERN);
-        // A pure precondition on the argument: validated before any filesystem
-        // access — including the `is_file()` / `is_dir()` probe below — so an
-        // invalid pattern is a diagnostic rather than a silently empty result,
-        // outranks `PathNotFound`, and is reported even for a single file.
-        validate_binding_pattern(pattern)?;
-
         let files: Vec<PathBuf> = if path.is_file() {
             vec![path.to_path_buf()]
         } else if path.is_dir() {
@@ -1426,56 +1370,71 @@ mod tests {
         assert!(!match_binding_pattern("*a*a*a*a*b", &name));
     }
 
-    // ---- Pattern validation (rejected before any filesystem access) ----
+    // ---- A pattern is never rejected (A25 requirement 2) ----
 
     #[test]
-    fn test_validate_binding_pattern_rejects_empty() {
-        let err = validate_binding_pattern("").unwrap_err();
-        match err {
-            BindingLoadError::InvalidPattern { pattern, reason } => {
-                assert_eq!(pattern, "");
-                assert_eq!(reason, REASON_EMPTY_PATTERN);
-            }
-            other => panic!("expected InvalidPattern, got {other:?}"),
-        }
-    }
+    fn test_odd_patterns_yield_an_empty_selection_not_an_error() {
+        // Every string is a valid pattern; the loader never errors on one for
+        // a syntactic reason. These asserted the inverse until 0.13.0.
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("a.binding.yaml"),
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "x", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
-    #[test]
-    fn test_validate_binding_pattern_rejects_path_separator() {
-        for pattern in [
+        for odd in [
+            "",
             "sub/*.binding.yaml",
             "**/*.binding.yaml",
-            "sub\\*.binding.yaml",
             "*.binding.yaml/",
+            "/",
+            "a[b",
+            "{x,y}",
         ] {
-            let err = validate_binding_pattern(pattern).unwrap_err();
-            match err {
-                BindingLoadError::InvalidPattern {
-                    pattern: got,
-                    reason,
-                } => {
-                    assert_eq!(got, pattern);
-                    assert_eq!(reason, REASON_PATH_SEPARATOR);
-                }
-                other => panic!("expected InvalidPattern for {pattern:?}, got {other:?}"),
-            }
+            let got = BindingLoader::new()
+                .load_with_pattern(dir.path(), false, false, Some(odd))
+                .unwrap_or_else(|e| panic!("pattern {odd:?} must not error, got {e:?}"));
+            assert!(got.is_empty(), "pattern {odd:?} should select nothing");
         }
     }
 
     #[test]
-    fn test_load_with_pattern_rejects_bad_pattern_before_filesystem_access() {
-        // The path does not exist; the pattern error must still win, proving
-        // validation happens before any filesystem access.
+    fn test_backslash_is_a_literal_not_a_path_separator() {
+        // A25 requirement 4 names `\` a literal, so a file name carrying one
+        // is matchable rather than the pattern being refused.
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("sub\\x.binding.yaml"),
+            serde_yaml_ng::to_string(
+                &json!({"spec_version": "1.0", "bindings": [{"module_id": "x", "target": "pkg:f"}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let got = BindingLoader::new()
+            .load_with_pattern(dir.path(), false, false, Some("sub\\*.binding.yaml"))
+            .unwrap();
+        let ids: Vec<&str> = got.iter().map(|m| m.module_id.as_str()).collect();
+        assert_eq!(ids, vec!["x"]);
+    }
+
+    #[test]
+    fn test_missing_path_is_reported_as_such_not_as_a_pattern_error() {
+        // An odd pattern used to pre-empt the real fault; there is no pattern
+        // error any more, so `PathNotFound` is what surfaces.
         let missing = Path::new("/definitely/does/not/exist/anywhere");
-        for bad in ["", "**/*.binding.yaml"] {
-            let err = BindingLoader::new()
-                .load_with_pattern(missing, false, false, Some(bad))
-                .unwrap_err();
-            assert!(
-                matches!(err, BindingLoadError::InvalidPattern { .. }),
-                "expected InvalidPattern for {bad:?}, got {err:?}"
-            );
-        }
+        let err = BindingLoader::new()
+            .load_with_pattern(missing, false, false, Some("**/*.binding.yaml"))
+            .unwrap_err();
+        assert!(
+            matches!(err, BindingLoadError::PathNotFound { .. }),
+            "expected PathNotFound, got {err:?}"
+        );
     }
 
     #[test]
@@ -1690,14 +1649,15 @@ mod tests {
         .unwrap();
         assert!(file.is_file());
 
-        for bad in ["", "**/*.yaml"] {
-            let err = BindingLoader::new()
-                .load_with_pattern(&file, false, false, Some(bad))
-                .unwrap_err();
-            assert!(
-                matches!(err, BindingLoadError::InvalidPattern { .. }),
-                "expected InvalidPattern for {bad:?} on a file path, got {err:?}"
-            );
+        // 0.12.0 validated the pattern even here, so these raised. 0.13.0
+        // removed validation, so "ignored for a single file" now means
+        // ignored outright: the named file loads whatever the pattern says.
+        for odd in ["", "**/*.yaml"] {
+            let got = BindingLoader::new()
+                .load_with_pattern(&file, false, false, Some(odd))
+                .unwrap_or_else(|e| panic!("pattern {odd:?} must not error on a file, got {e:?}"));
+            let ids: Vec<&str> = got.iter().map(|m| m.module_id.as_str()).collect();
+            assert_eq!(ids, vec!["one.mod"], "pattern {odd:?} must be ignored");
         }
     }
 

@@ -65,8 +65,7 @@ pub mod types;
 // Re-export primary types at crate root for convenience.
 pub use ai_enhancer::{AIEnhancer, AIEnhancerError, Enhancer};
 pub use binding_loader::{
-    match_binding_pattern, validate_binding_pattern, BindingLoadError, BindingLoader,
-    DEFAULT_BINDING_PATTERN,
+    match_binding_pattern, BindingLoadError, BindingLoader, DEFAULT_BINDING_PATTERN,
 };
 pub use conformance::assert_annotations_preserved;
 pub use display::{DisplayResolver, DisplayResolverError};

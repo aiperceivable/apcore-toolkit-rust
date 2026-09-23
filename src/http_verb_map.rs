@@ -191,6 +191,40 @@ pub fn substitute_path_params<V: AsRef<str>>(path: &str, values: &HashMap<&str, 
     result
 }
 
+/// Generate a dot-separated suggested alias from HTTP route info.
+///
+/// The alias is built from non-parameter path segments joined with the
+/// resolved semantic verb (see [`resolve_http_verb`]). The output uses
+/// snake_case preserved from the path; surface adapters apply their own
+/// naming conventions (e.g. CLI converts underscores to hyphens).
+///
+/// The GET-vs-list disambiguation checks whether the LAST path segment is a
+/// path parameter (single-resource access) rather than whether the path
+/// contains any parameters anywhere. This correctly treats nested
+/// collection endpoints like `/orgs/{org_id}/members` as `"list"`.
+///
+/// # Arguments
+///
+/// * `path` - URL path (e.g. `/tasks/user_data/{id}`).
+/// * `method` - HTTP method (e.g. `POST`).
+///
+/// # Returns
+///
+/// A dot-separated alias string. If the path has no non-parameter segments,
+/// returns just the semantic verb (e.g. `"list"`).
+///
+/// # Examples
+///
+/// ```
+/// use apcore_toolkit::http_verb_map::generate_suggested_alias;
+///
+/// assert_eq!(generate_suggested_alias("/tasks/user_data", "POST"), "tasks.user_data.create");
+/// assert_eq!(generate_suggested_alias("/tasks/user_data", "GET"), "tasks.user_data.list");
+/// assert_eq!(generate_suggested_alias("/tasks/user_data/{id}", "GET"), "tasks.user_data.get");
+/// assert_eq!(generate_suggested_alias("/tasks/user_data/{id}", "PUT"), "tasks.user_data.update");
+/// assert_eq!(generate_suggested_alias("/tasks/user_data/{id}", "DELETE"), "tasks.user_data.delete");
+/// assert_eq!(generate_suggested_alias("/orgs/{org_id}/members", "GET"), "orgs.members.list");
+/// ```
 pub fn generate_suggested_alias(path: &str, method: &str) -> String {
     let trimmed = path.trim_matches('/');
     let raw_segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();

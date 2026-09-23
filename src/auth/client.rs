@@ -18,7 +18,7 @@ use crate::auth::grant::{
     AuthRuntime, BoxFuture, ClockFn, DeviceCodeGrant, Grant, LoginCallbacks, SleepFn, WallClockFn,
 };
 use crate::auth::parse::{read_string, RequestKind};
-use crate::auth::request::{prepare_request, refresh_params};
+use crate::auth::request::{prepare_request, refresh_params, revoke_params};
 use crate::auth::store::{NullTokenStore, TokenStore};
 use crate::auth::token::{TokenSet, DEFAULT_SKEW_SECONDS};
 use crate::auth::transport::{ReqwestTransport, SharedTransport};
@@ -329,6 +329,53 @@ impl DeviceAuthClient {
         Ok(())
     }
 
+    /// Clear the stored credential for this client's key, revoking it first
+    /// where possible (RFC 7009).
+    ///
+    /// When a `revocation_endpoint` is configured and a credential is
+    /// currently stored, this sends a best-effort revocation request for the
+    /// access token before clearing the local store. Revocation is
+    /// best-effort because RFC 7009 is not universally implemented: a
+    /// transport failure while revoking is logged and otherwise ignored, and
+    /// never prevents the local credential from being discarded. The HTTP
+    /// response status is not inspected either, for the same reason.
+    ///
+    /// If no `revocation_endpoint` is configured, or nothing is stored, this
+    /// is equivalent to [`DeviceAuthClient::forget`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates store I/O errors (loading or clearing the credential).
+    /// Revocation request failures are never returned here; see above.
+    pub async fn logout(&self) -> Result<(), DeviceAuthError> {
+        let stored = self.store.load(&self.key).await?;
+        if let Some(tokens) = stored {
+            if let Some(revocation_endpoint) = self.runtime.config.revocation_endpoint.clone() {
+                let request = prepare_request(
+                    &self.runtime.config,
+                    RequestKind::Revoke,
+                    revoke_params(&tokens.access_token, Some("access_token")),
+                );
+                if let Err(e) = self
+                    .runtime
+                    .transport
+                    .post(
+                        &revocation_endpoint,
+                        &to_header_map(&request.headers),
+                        request.body,
+                    )
+                    .await
+                {
+                    warn!(
+                        "device auth: revocation request failed; clearing the local \
+                         credential anyway: {e}"
+                    );
+                }
+            }
+        }
+        self.forget().await
+    }
+
     /// The currently cached credential, if any.
     pub fn cached(&self) -> Option<TokenSet> {
         self.cached.lock().ok().and_then(|slot| slot.clone())
@@ -399,14 +446,21 @@ mod tests {
 
     /// A scripted transport: the injection seam the conformance corpus uses,
     /// exercised here for the store-facing half of the client.
+    ///
+    /// Also records every URL it was called with, so tests can assert not
+    /// just that a request happened but that it went where expected -- used
+    /// by the `logout` tests to prove a revoke request either was, or was
+    /// not, dispatched.
     struct Scripted {
         responses: Mutex<Vec<Result<HttpResponse, TransportError>>>,
+        calls: Mutex<Vec<String>>,
     }
 
     impl Scripted {
         fn new(responses: Vec<Result<HttpResponse, TransportError>>) -> Arc<Self> {
             Arc::new(Self {
                 responses: Mutex::new(responses),
+                calls: Mutex::new(Vec::new()),
             })
         }
     }
@@ -415,10 +469,11 @@ mod tests {
     impl HttpTransport for Scripted {
         async fn post(
             &self,
-            _url: &str,
+            url: &str,
             _headers: &HashMap<String, String>,
             _body: RequestBody,
         ) -> Result<HttpResponse, TransportError> {
+            self.calls.lock().expect("lock").push(url.to_string());
             let mut queue = self.responses.lock().expect("lock");
             if queue.is_empty() {
                 return Err(TransportError::new("scripted transport exhausted"));
@@ -428,10 +483,10 @@ mod tests {
 
         async fn get(
             &self,
-            _url: &str,
-            _headers: &HashMap<String, String>,
+            url: &str,
+            headers: &HashMap<String, String>,
         ) -> Result<HttpResponse, TransportError> {
-            self.post(_url, _headers, RequestBody::Empty).await
+            self.post(url, headers, RequestBody::Empty).await
         }
     }
 
@@ -789,6 +844,78 @@ mod tests {
         assert!(block_on(store.load(client.store_key()))
             .expect("load")
             .is_none());
+    }
+
+    #[test]
+    fn test_logout_revokes_when_endpoint_configured_then_clears_store() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(FileTokenStore::at(dir.path().join("credentials.json")));
+        let mut cfg = config();
+        cfg.revocation_endpoint = Some("https://a.example/revoke".to_string());
+        let transport = Scripted::new(vec![json(200, "")]);
+        let probe = Arc::clone(&transport);
+        let client = DeviceAuthClient::new(cfg, store.clone())
+            .expect("client")
+            .with_transport(transport);
+        block_on(store.save(client.store_key(), &stored("t", Some("r1"), None))).expect("save");
+
+        block_on(client.logout()).expect("logout");
+
+        let calls = probe.calls.lock().expect("lock");
+        assert_eq!(calls.as_slice(), ["https://a.example/revoke"]);
+        drop(calls);
+        assert!(block_on(store.load(client.store_key()))
+            .expect("load")
+            .is_none());
+        assert!(client.cached().is_none());
+    }
+
+    #[test]
+    fn test_logout_tolerates_a_revoke_transport_failure_and_still_clears_store() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(FileTokenStore::at(dir.path().join("credentials.json")));
+        let mut cfg = config();
+        cfg.revocation_endpoint = Some("https://a.example/revoke".to_string());
+        let transport = Scripted::new(vec![Err(TransportError::new("connection reset"))]);
+        let client = DeviceAuthClient::new(cfg, store.clone())
+            .expect("client")
+            .with_transport(transport);
+        block_on(store.save(client.store_key(), &stored("t", Some("r1"), None))).expect("save");
+
+        // A revocation failure must not surface as an error, nor prevent the
+        // local credential from being discarded.
+        block_on(client.logout()).expect("logout");
+
+        assert!(block_on(store.load(client.store_key()))
+            .expect("load")
+            .is_none());
+    }
+
+    #[test]
+    fn test_logout_without_revocation_endpoint_only_clears_store() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = Arc::new(FileTokenStore::at(dir.path().join("credentials.json")));
+        // No revocation_endpoint configured, and an exhausted transport --
+        // proving no request of any kind is dispatched.
+        let transport = Scripted::new(vec![]);
+        let probe = Arc::clone(&transport);
+        let client = DeviceAuthClient::new(config(), store.clone())
+            .expect("client")
+            .with_transport(transport);
+        block_on(store.save(client.store_key(), &stored("t", None, None))).expect("save");
+
+        block_on(client.logout()).expect("logout");
+
+        assert!(probe.calls.lock().expect("lock").is_empty());
+        assert!(block_on(store.load(client.store_key()))
+            .expect("load")
+            .is_none());
+    }
+
+    #[test]
+    fn test_logout_with_no_stored_credential_is_a_noop_clear() {
+        let client = DeviceAuthClient::without_store(config()).expect("client");
+        block_on(client.logout()).expect("logout");
     }
 
     #[test]

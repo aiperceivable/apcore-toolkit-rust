@@ -7,13 +7,10 @@
 // the `bindings.pattern` argument (see
 // `apcore-toolkit/docs/features/binding-loader.md#pattern-matching`).
 //
-// Three case kinds:
+// Two case kinds. There is no `validate` kind: as of 0.13.0 every string is a
+// valid pattern and the loader never errors on one for a syntactic reason,
+// matching apcore's Algorithm A25 requirement 2.
 //
-// - `validate` — the pattern is rejected before any filesystem access. The
-//   fixture asserts a stable *identifier* (`empty_pattern` / `path_separator`);
-//   per the spec, each SDK phrases the human-readable reason idiomatically, so
-//   this harness maps Rust's `BindingLoadError::InvalidPattern { reason, .. }`
-//   back onto those two identifiers.
 // - `match` — the pure name matcher, via `match_binding_pattern`.
 // - `select` — how `pattern` composes with `recursive` over a real directory
 //   tree, via the loader itself.
@@ -33,7 +30,7 @@
 
 use std::path::PathBuf;
 
-use apcore_toolkit::{match_binding_pattern, BindingLoadError, BindingLoader};
+use apcore_toolkit::{match_binding_pattern, BindingLoader};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -57,25 +54,6 @@ fn load_cases() -> Vec<Value> {
     };
     let doc: Value = serde_json::from_str(&content).expect("fixture must be valid JSON");
     doc["test_cases"].as_array().cloned().unwrap_or_default()
-}
-
-/// Map a Rust loader error onto the fixture's stable error identifiers.
-///
-/// The spec fixes the identifiers and leaves the message wording to each SDK,
-/// so the mapping is keyed on the distinguishing phrase of each reason.
-fn pattern_error_id(err: &BindingLoadError) -> String {
-    match err {
-        BindingLoadError::InvalidPattern { reason, .. } => {
-            if reason.contains("must not be empty") {
-                "empty_pattern".to_string()
-            } else if reason.contains("file names only") {
-                "path_separator".to_string()
-            } else {
-                format!("<unmapped reason: {reason}>")
-            }
-        }
-        other => format!("<not InvalidPattern: {other}>"),
-    }
 }
 
 /// A binding document whose single entry carries `module_id` = `rel_path`, so
@@ -177,29 +155,6 @@ fn string_list(raw: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn run_validate_case(input: &Value, expected: &Value) -> Outcome {
-    let pattern = input["pattern"].as_str().expect("pattern must be a string");
-    let want = expected["error"].as_str().expect("error must be a string");
-
-    // A path that does not exist: if validation did not run first, the loader
-    // would report `PathNotFound` instead, so this also pins "validated before
-    // any filesystem access".
-    let root = TempDir::new().expect("temp dir");
-    let missing = root.path().join("no-such-directory");
-
-    match BindingLoader::new().load_with_pattern(&missing, false, false, Some(pattern)) {
-        Ok(_) => Outcome::Fail(format!("expected error {want:?}, got Ok")),
-        Err(err) => {
-            let got = pattern_error_id(&err);
-            if got == want {
-                Outcome::Pass
-            } else {
-                Outcome::Fail(format!("expected error {want:?}, got {got:?}"))
-            }
-        }
-    }
-}
-
 fn run_match_case(input: &Value, expected: &Value) -> Outcome {
     let pattern = input["pattern"].as_str().expect("pattern must be a string");
     let name = input["name"].as_str().expect("name must be a string");
@@ -281,7 +236,6 @@ fn binding_pattern_matches_shared_conformance_fixture() {
         let expected = &case["expected"];
 
         let outcome = match kind {
-            "validate" => run_validate_case(input, expected),
             "match" => run_match_case(input, expected),
             "select" => run_select_case(input, expected),
             other => Outcome::Fail(format!("unknown case kind {other:?}")),

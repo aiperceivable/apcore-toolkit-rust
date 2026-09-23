@@ -233,4 +233,62 @@ mod tests {
     fn test_transport_error_displays_message() {
         assert_eq!(TransportError::new("reset").to_string(), "reset");
     }
+
+    // `ReqwestTransport::post`/`get` had no test calling them at all: every
+    // other auth test drives the `HttpTransport` trait through the scripted
+    // test double in `client.rs`, never the real `reqwest`-backed
+    // implementation. This drives `post` against a real loopback HTTP
+    // server, following the same hand-rolled-responder pattern used for the
+    // W2 regression tests in `src/output/http_proxy_writer.rs`. A plain
+    // `#[test]` has no async I/O reactor for `reqwest`, hence
+    // `#[tokio::test]`.
+    #[tokio::test]
+    async fn test_reqwest_transport_post_against_loopback_server() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let (tx, rx) = mpsc::channel::<String>();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = tx.send(request);
+                let body = r#"{"access_token":"tok","token_type":"Bearer"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let transport = ReqwestTransport::default();
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "application/json".to_string());
+        let response = transport
+            .post(
+                &format!("http://{addr}/token"),
+                &headers,
+                RequestBody::Form("grant_type=client_credentials".to_string()),
+            )
+            .await
+            .expect("post against loopback server");
+
+        assert_eq!(response.status, 200);
+        assert!(response.body.contains("tok"));
+        assert_eq!(response.content_type.as_deref(), Some("application/json"));
+
+        handle.join().expect("mock server thread panicked");
+        let received = rx.recv().expect("request line received");
+        assert!(
+            received.starts_with("POST /token"),
+            "unexpected request line: {received}"
+        );
+    }
 }

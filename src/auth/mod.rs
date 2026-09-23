@@ -81,7 +81,9 @@ pub use parse::{
     decode_body, default_field_aliases, normalise_device_body, read_field, read_i64, read_string,
     ErrorIdentifier, ParsedBody, RequestKind,
 };
-pub use request::{device_params, prepare_request, refresh_params, token_params, PreparedRequest};
+pub use request::{
+    device_params, prepare_request, refresh_params, revoke_params, token_params, PreparedRequest,
+};
 pub use store::{default_credentials_path, store_key, FileTokenStore, NullTokenStore, TokenStore};
 pub use token::{TokenSet, DEFAULT_SKEW_SECONDS, REDACTED};
 pub use transport::{

@@ -409,4 +409,62 @@ mod tests {
         let m: ScannedModule = serde_json::from_str(json_str).unwrap();
         assert_eq!(m.version, "1.0.0");
     }
+
+    #[test]
+    fn test_create_scanned_module_matches_scanned_module_new() {
+        // Tri-language parity helper: `create_scanned_module` must produce
+        // the exact same result as `ScannedModule::new` for the same
+        // arguments, mirroring the Python and TypeScript equivalents.
+        let via_free_function = create_scanned_module(
+            "users.get_user".into(),
+            "Get a user by ID".into(),
+            json!({"type": "object", "properties": {"user_id": {"type": "integer"}}}),
+            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            vec!["users".into()],
+            "myapp.views:get_user".into(),
+        );
+        let via_constructor = ScannedModule::new(
+            "users.get_user".into(),
+            "Get a user by ID".into(),
+            json!({"type": "object", "properties": {"user_id": {"type": "integer"}}}),
+            json!({"type": "object", "properties": {"name": {"type": "string"}}}),
+            vec!["users".into()],
+            "myapp.views:get_user".into(),
+        );
+        assert_eq!(
+            serde_json::to_value(&via_free_function).unwrap(),
+            serde_json::to_value(&via_constructor).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_clone_module_matches_derived_clone() {
+        let mut m = ScannedModule::new(
+            "tasks.create".into(),
+            "Create task".into(),
+            json!({"type": "object"}),
+            json!({"type": "object"}),
+            vec!["tasks".into()],
+            "myapp:create_task".into(),
+        );
+        m.annotations = Some(ModuleAnnotations {
+            destructive: true,
+            ..Default::default()
+        });
+        m.tags.push("extra".into());
+        m.metadata.insert("http_method".into(), json!("POST"));
+
+        let via_free_function = clone_module(&m);
+        let via_derived_clone = m.clone();
+
+        assert_eq!(
+            serde_json::to_value(&via_free_function).unwrap(),
+            serde_json::to_value(&via_derived_clone).unwrap()
+        );
+        // Independent copies, not shared state: mutating one must not affect
+        // the other.
+        let mut via_free_function = via_free_function;
+        via_free_function.tags.push("mutated".into());
+        assert!(!m.tags.contains(&"mutated".to_string()));
+    }
 }

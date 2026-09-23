@@ -812,4 +812,45 @@ mod tests {
         let result = block_on(load_spec(path.to_str().unwrap()));
         assert!(matches!(result, Err(LoadSpecError::Json(_))));
     }
+
+    // The four tests above only ever exercise the local-file branch of
+    // `load_spec_with_options`; none of them ever build a `reqwest::Client`
+    // or open a socket. This drives the `http://` branch (source lines
+    // ~613-626) against a real loopback HTTP server, following the same
+    // hand-rolled-responder pattern used for the W2 regression tests in
+    // `src/output/http_proxy_writer.rs`. `futures::executor::block_on` (this
+    // module's `block_on` helper) has no I/O reactor, so this needs a real
+    // `tokio` runtime -- hence `#[tokio::test]` rather than the shared
+    // helper.
+    #[cfg(feature = "http-proxy")]
+    #[tokio::test]
+    async fn test_load_spec_with_options_http_branch_fetches_from_loopback_server() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"openapi":"3.0.3","paths":{}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let url = format!("http://{addr}/spec.json");
+        let doc = load_spec_with_options(&url, &LoadSpecOptions::default())
+            .await
+            .expect("load_spec_with_options over http");
+        assert_eq!(doc["openapi"], "3.0.3");
+
+        handle.join().expect("mock server thread panicked");
+    }
 }
