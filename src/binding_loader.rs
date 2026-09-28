@@ -1375,7 +1375,7 @@ mod tests {
     #[test]
     fn test_odd_patterns_yield_an_empty_selection_not_an_error() {
         // Every string is a valid pattern; the loader never errors on one for
-        // a syntactic reason. These asserted the inverse until 0.13.0.
+        // a syntactic reason. These asserted the inverse in a pre-release draft of 0.12.0.
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("a.binding.yaml"),
@@ -1649,8 +1649,8 @@ mod tests {
         .unwrap();
         assert!(file.is_file());
 
-        // 0.12.0 validated the pattern even here, so these raised. 0.13.0
-        // removed validation, so "ignored for a single file" now means
+        // A pre-release draft of 0.12.0 validated the pattern even here, so these
+        // raised. 0.12.0 as released has no validation, so "ignored for a single file" now means
         // ignored outright: the named file loads whatever the pattern says.
         for odd in ["", "**/*.yaml"] {
             let got = BindingLoader::new()

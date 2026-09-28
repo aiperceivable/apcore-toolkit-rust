@@ -7,7 +7,7 @@
 // the `bindings.pattern` argument (see
 // `apcore-toolkit/docs/features/binding-loader.md#pattern-matching`).
 //
-// Two case kinds. There is no `validate` kind: as of 0.13.0 every string is a
+// Two case kinds. There is no `validate` kind: as of 0.12.0 every string is a
 // valid pattern and the loader never errors on one for a syntactic reason,
 // matching apcore's Algorithm A25 requirement 2.
 //
