@@ -16,10 +16,23 @@ use crate::types::ScannedModule;
 /// and `source_name()` for identification. The `App` type parameter allows
 /// each framework adapter to accept its own application type.
 ///
+/// `scan` is fallible. Each implementation names its own error type through
+/// the associated [`BaseScanner::Error`]; one that cannot fail uses
+/// [`std::convert::Infallible`]. Before 0.13.0 `scan` returned a bare
+/// `Vec<ScannedModule>`, which left a Rust scanner no way to report the
+/// failures the Python and TypeScript scanners raise — it had to panic or
+/// return an empty list
+/// ([apcore-toolkit-rust#4](https://github.com/aiperceivable/apcore-toolkit-rust/issues/4)).
+///
 /// # Language-specific API shape
 ///
 /// The Rust `BaseScanner` trait intentionally contains only the primitive `scan()` and
-/// `source_name()` operations, keeping it object-safe (usable as `Box<dyn BaseScanner>`).
+/// `source_name()` operations, keeping it object-safe: with the error type named, it is
+/// usable as `Box<dyn BaseScanner<App, Error = E>>`.
+///
+/// Where Python and TypeScript let each subclass define `scan`'s signature, Rust fixes
+/// it to one argument, `app: &App`; an implementation needing several inputs bundles
+/// them into its `App` type.
 ///
 /// Helper utilities — [`filter_modules`], [`deduplicate_ids`], [`infer_annotations_from_method`] —
 /// are free functions in the `scanner` module rather than trait default methods.
@@ -38,32 +51,109 @@ use crate::types::ScannedModule;
 /// discovery, which has no equivalent in Rust. Rust consumers should use `BaseScanner`
 /// implementations that work with Rust's type system directly.
 ///
+/// # Examples
+///
+/// A scanner that can fail names its error type, and `?` propagates the
+/// shared helpers' errors into it:
+///
+/// ```
+/// use apcore_toolkit::{deduplicate_ids, filter_modules, BaseScanner, ScannedModule};
+/// use async_trait::async_trait;
+/// use serde_json::json;
+///
+/// /// A route table standing in for a framework's application type.
+/// struct Routes(Vec<&'static str>);
+///
+/// #[derive(Debug, thiserror::Error)]
+/// enum RoutesScanError {
+///     #[error("invalid include pattern: {0}")]
+///     Pattern(#[from] regex::Error),
+/// }
+///
+/// struct RoutesScanner {
+///     include: Option<String>,
+/// }
+///
+/// #[async_trait]
+/// impl BaseScanner<Routes> for RoutesScanner {
+///     type Error = RoutesScanError;
+///
+///     async fn scan(&self, app: &Routes) -> Result<Vec<ScannedModule>, Self::Error> {
+///         let modules: Vec<ScannedModule> = app
+///             .0
+///             .iter()
+///             .map(|id| {
+///                 ScannedModule::new(
+///                     (*id).to_string(),
+///                     format!("Handler for {id}"),
+///                     json!({"type": "object"}),
+///                     json!({"type": "object"}),
+///                     vec![],
+///                     format!("routes:{id}"),
+///                 )
+///             })
+///             .collect();
+///         let filtered = filter_modules(&modules, self.include.as_deref(), None)?;
+///         Ok(deduplicate_ids(filtered))
+///     }
+///
+///     fn source_name(&self) -> &str {
+///         "routes"
+///     }
+/// }
+///
+/// let app = Routes(vec!["users.get", "users.get", "tasks.list"]);
+/// let scanner = RoutesScanner { include: Some(r"^users\.".to_string()) };
+/// let modules = futures::executor::block_on(scanner.scan(&app))?;
+/// assert_eq!(modules.len(), 2);
+/// assert_eq!(modules[1].module_id, "users.get_2");
+///
+/// let broken = RoutesScanner { include: Some("[unclosed".to_string()) };
+/// assert!(futures::executor::block_on(broken.scan(&app)).is_err());
+/// # Ok::<(), RoutesScanError>(())
+/// ```
+///
+/// Framework adapters have the same shape (not compiled here: they need the
+/// framework crates):
+///
 /// ```ignore
 /// // Example: Axum adapter
 /// struct AxumScanner;
 ///
 /// #[async_trait]
 /// impl BaseScanner<axum::Router> for AxumScanner {
-///     async fn scan(&self, app: &axum::Router) -> Vec<ScannedModule> { /* ... */ }
+///     type Error = AxumScanError;
+///     async fn scan(&self, app: &axum::Router) -> Result<Vec<ScannedModule>, Self::Error> { /* ... */ }
 ///     fn source_name(&self) -> &str { "axum" }
 /// }
 ///
-/// // Example: Actix adapter
+/// // Example: Actix adapter that cannot fail
 /// struct ActixScanner;
 ///
 /// #[async_trait]
 /// impl BaseScanner<()> for ActixScanner {
-///     async fn scan(&self, _app: &()) -> Vec<ScannedModule> { /* ... */ }
+///     type Error = std::convert::Infallible;
+///     async fn scan(&self, _app: &()) -> Result<Vec<ScannedModule>, Self::Error> { /* ... */ }
 ///     fn source_name(&self) -> &str { "actix-web" }
 /// }
 /// ```
 #[async_trait]
 pub trait BaseScanner<App: Send + Sync = ()> {
+    /// Error returned by `scan`; use `std::convert::Infallible` for a scanner that cannot fail.
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Scan endpoints and return module definitions.
     ///
     /// The `app` parameter receives framework-specific state (e.g., `axum::Router`,
     /// `actix_web::App`). Use `()` if no app context is needed.
-    async fn scan(&self, app: &App) -> Vec<ScannedModule>;
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(Self::Error)` when the scan cannot produce a module list —
+    /// for example an invalid `include`/`exclude` pattern forwarded to
+    /// [`filter_modules`]. What counts as a failure is the implementation's
+    /// to define, as it is in the Python and TypeScript SDKs.
+    async fn scan(&self, app: &App) -> Result<Vec<ScannedModule>, Self::Error>;
 
     /// Return human-readable scanner name (e.g., "axum", "actix-web").
     fn source_name(&self) -> &str;
@@ -203,6 +293,129 @@ mod tests {
             vec![],
             "app:func".into(),
         )
+    }
+
+    // ---- BaseScanner ----
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("scan failed: {0}")]
+    struct TestScanError(String);
+
+    struct FixedScanner(Vec<&'static str>);
+
+    #[async_trait]
+    impl BaseScanner<()> for FixedScanner {
+        type Error = TestScanError;
+
+        async fn scan(&self, _app: &()) -> Result<Vec<ScannedModule>, Self::Error> {
+            Ok(self.0.iter().map(|id| make_module(id)).collect())
+        }
+
+        fn source_name(&self) -> &str {
+            "fixed"
+        }
+    }
+
+    struct FailingScanner;
+
+    #[async_trait]
+    impl BaseScanner<()> for FailingScanner {
+        type Error = TestScanError;
+
+        async fn scan(&self, _app: &()) -> Result<Vec<ScannedModule>, Self::Error> {
+            Err(TestScanError("app not ready".into()))
+        }
+
+        fn source_name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    struct InfallibleScanner;
+
+    #[async_trait]
+    impl BaseScanner<()> for InfallibleScanner {
+        type Error = std::convert::Infallible;
+
+        async fn scan(&self, _app: &()) -> Result<Vec<ScannedModule>, Self::Error> {
+            Ok(vec![make_module("always.ok")])
+        }
+
+        fn source_name(&self) -> &str {
+            "infallible"
+        }
+    }
+
+    /// Scans the ids listed in the app value itself: a non-`()` `App`.
+    struct AppDrivenScanner;
+
+    #[async_trait]
+    impl BaseScanner<Vec<String>> for AppDrivenScanner {
+        type Error = TestScanError;
+
+        async fn scan(&self, app: &Vec<String>) -> Result<Vec<ScannedModule>, Self::Error> {
+            if app.is_empty() {
+                return Err(TestScanError("no routes".into()));
+            }
+            Ok(app.iter().map(|id| make_module(id)).collect())
+        }
+
+        fn source_name(&self) -> &str {
+            "app-driven"
+        }
+    }
+
+    #[test]
+    fn test_base_scanner_boxed_trait_object_with_named_error() {
+        let scanners: Vec<Box<dyn BaseScanner<(), Error = TestScanError>>> = vec![
+            Box::new(FixedScanner(vec!["users.get", "tasks.list"])),
+            Box::new(FailingScanner),
+        ];
+
+        let first = futures::executor::block_on(scanners[0].scan(&())).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(scanners[0].source_name(), "fixed");
+
+        let second = futures::executor::block_on(scanners[1].scan(&()));
+        assert_eq!(
+            second.unwrap_err().to_string(),
+            "scan failed: app not ready"
+        );
+        assert_eq!(scanners[1].source_name(), "failing");
+    }
+
+    #[test]
+    fn test_base_scanner_boxed_trait_object_infallible() {
+        let scanner: Box<dyn BaseScanner<(), Error = std::convert::Infallible> + Send + Sync> =
+            Box::new(InfallibleScanner);
+        let Ok(modules) = futures::executor::block_on(scanner.scan(&()));
+        assert_eq!(modules[0].module_id, "always.ok");
+    }
+
+    #[test]
+    fn test_base_scanner_boxed_trait_object_with_app_type() {
+        let scanner: Box<dyn BaseScanner<Vec<String>, Error = TestScanError>> =
+            Box::new(AppDrivenScanner);
+        let app = vec!["a.get".to_string()];
+        let modules = futures::executor::block_on(scanner.scan(&app)).unwrap();
+        assert_eq!(modules[0].module_id, "a.get");
+        assert!(futures::executor::block_on(scanner.scan(&Vec::new())).is_err());
+    }
+
+    #[test]
+    fn test_base_scanner_error_propagates_into_boxed_error() {
+        // The `std::error::Error + Send + Sync + 'static` bound is what lets
+        // a caller holding any scanner use `?` into a boxed error.
+        fn count_modules<S: BaseScanner<()>>(
+            scanner: &S,
+        ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(futures::executor::block_on(scanner.scan(&()))?.len())
+        }
+
+        assert_eq!(count_modules(&FixedScanner(vec!["a"])).unwrap(), 1);
+        assert_eq!(count_modules(&InfallibleScanner).unwrap(), 1);
+        let err = count_modules(&FailingScanner).unwrap_err();
+        assert_eq!(err.to_string(), "scan failed: app not ready");
     }
 
     #[test]

@@ -30,13 +30,13 @@ apcore-toolkit = { git = "https://github.com/aiperceivable/apcore-toolkit-rust",
 | Module | Description |
 |--------|-------------|
 | `ScannedModule` | Canonical struct representing a scanned endpoint |
-| `BaseScanner<App>` | Async trait for framework scanners, generic over the `App` type with default `()` (e.g., `BaseScanner<axum::Router>`) |
+| `BaseScanner<App>` | Async trait for framework scanners, generic over the `App` type with default `()` (e.g., `BaseScanner<axum::Router>`); `scan` is fallible, returning `Result<Vec<ScannedModule>, Self::Error>` with an implementation-chosen `type Error` |
 | `filter_modules` | Regex-based include/exclude filtering for scanned modules |
 | `deduplicate_ids` | Resolves duplicate module IDs by appending `_2`, `_3`, etc. |
 | `infer_annotations_from_method` | Maps HTTP methods to behavioral `ModuleAnnotations` |
 | `OpenAPIScanner` | Scans an OpenAPI spec into `ScannedModule` values; configured via `ScanOptions` (hooks: `DeriveModuleIdHook`, `TransformOperationHook`, `TransformModuleHook`) |
 | `ScanOptions` / `ScannerError` | Configuration struct and `thiserror`-derived error enum for `OpenAPIScanner` |
-| `derive_module_id` | Default module-ID derivation strategy for an OpenAPI operation (path + method) |
+| `derive_module_id` | Default module-ID derivation for an OpenAPI operation (`operationId`, else path + method), in apcore's Canonical ID alphabet (`getUserById` → `get_user_by_id`) |
 | `load_spec` / `load_spec_with_options` | Loads an OpenAPI spec document from a file or URL (feature: `http-proxy`) |
 | `YAMLWriter` | Generates `.binding.yaml` files for `apcore::BindingLoader` |
 | `BindingLoader` | Parses `.binding.yaml` files back into `ScannedModule` values (pure-data inverse of `YAMLWriter`, with loose/strict modes) |
@@ -86,8 +86,11 @@ struct MyScanner;
 
 #[async_trait]
 impl BaseScanner<()> for MyScanner {
-    async fn scan(&self, _app: &()) -> Vec<ScannedModule> {
-        vec![
+    // A scanner that cannot fail says so; one that can names its error type.
+    type Error = std::convert::Infallible;
+
+    async fn scan(&self, _app: &()) -> Result<Vec<ScannedModule>, Self::Error> {
+        Ok(vec![
             ScannedModule::new(
                 "users.get_user".into(),
                 "Get a user by ID".into(),
@@ -96,7 +99,7 @@ impl BaseScanner<()> for MyScanner {
                 vec!["users".into()],
                 "myapp:get_user".into(),
             )
-        ]
+        ])
     }
 
     fn source_name(&self) -> &str {
@@ -105,19 +108,25 @@ impl BaseScanner<()> for MyScanner {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scanner = MyScanner;
-    let modules = scanner.scan(&()).await;
+    let modules = scanner.scan(&()).await?;
 
     // Filter and deduplicate
-    let modules = filter_modules(&modules, Some(r"^users\."), None).unwrap();
+    let modules = filter_modules(&modules, Some(r"^users\."), None)?;
     let modules = deduplicate_ids(modules);
 
     // Write YAML binding files
     let writer = YAMLWriter;
-    writer.write(&modules, "./bindings", false, false, None).unwrap();
+    writer.write(&modules, "./bindings", false, false, None)?;
+    Ok(())
 }
 ```
+
+`BaseScanner::scan` returns `Result<Vec<ScannedModule>, Self::Error>`: each
+implementation declares its own `type Error` (any `std::error::Error + Send +
+Sync + 'static`), and one that cannot fail uses `std::convert::Infallible`.
+The trait stays object-safe — `Box<dyn BaseScanner<App, Error = E>>` works.
 
 ### Framework-Specific Scanner (Axum Example)
 
@@ -127,14 +136,49 @@ use async_trait::async_trait;
 
 struct AxumScanner;
 
+#[derive(Debug, thiserror::Error)]
+enum AxumScanError {
+    #[error("invalid include/exclude pattern: {0}")]
+    Pattern(#[from] regex::Error),
+}
+
 #[async_trait]
 impl BaseScanner<axum::Router> for AxumScanner {
-    async fn scan(&self, app: &axum::Router) -> Vec<ScannedModule> {
+    type Error = AxumScanError;
+
+    async fn scan(&self, app: &axum::Router) -> Result<Vec<ScannedModule>, Self::Error> {
         // Extract routes from Axum router and convert to ScannedModule instances
         todo!("Implement route extraction")
     }
 
     fn source_name(&self) -> &str { "axum" }
+}
+```
+
+### OpenAPI Documents
+
+`OpenAPIScanner` scans an OpenAPI 3.0/3.1 document rather than a framework
+application, so it is a standalone struct with an inherent, fallible `scan`
+method, not a `BaseScanner` impl: its input is a document plus `ScanOptions`,
+and nothing in the ecosystem dispatches over `BaseScanner` implementations
+polymorphically. Every emitted `module_id` is normalised into apcore's
+Canonical ID alphabet (`listPets` → `list_pets`, `/user-profiles/{userId}` →
+`user_profiles.user_id.get`), and an ID apcore already accepts is never
+rewritten (FastAPI's `read_item_items__item_id__get` passes through as is).
+An ID that normalisation cannot make legal (a segment beginning with a digit,
+such as `v1.2fa.post`) is still emitted, with a warning in
+`ScannedModule::warnings`. The raw `operationId` stays in
+`metadata["openapi"]["operation_id"]`.
+
+```rust,ignore
+use apcore_toolkit::{OpenAPIScanner, ScanOptions};
+
+let spec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string("openapi.json")?)?;
+let modules = OpenAPIScanner::new().scan(&spec, &ScanOptions::new()).await?;
+for module in &modules {
+    for warning in &module.warnings {
+        eprintln!("{}: {warning}", module.module_id);
+    }
 }
 ```
 

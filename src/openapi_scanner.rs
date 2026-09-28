@@ -10,19 +10,21 @@
 //
 // # Why this is not a `BaseScanner` impl
 //
-// `BaseScanner::scan` is `async fn scan(&self, app: &App) -> Vec<ScannedModule>`
-// — a fixed single-argument, infallible-return shape designed for
-// framework-introspection scanners. `OpenAPIScanner` needs multiple named
-// parameters (`spec`, `include`, `exclude`, `base_path_prefix`,
-// `include_deprecated`, three optional hook closures) *and* a fallible
-// return (`Err` for a non-OpenAPI-3.x document). Forcing that into
-// `BaseScanner` would require an awkward options-struct-as-`App` hack and
-// silently swallowing the one real error case.
+// [`apcore-toolkit-rust#4`](https://github.com/aiperceivable/apcore-toolkit-rust/issues/4)
+// anticipated `OpenAPIScanner` as the trait's first non-framework
+// implementation, and two things stood in the way. One is fixed:
+// `BaseScanner::scan` now returns `Result<Vec<ScannedModule>, Self::Error>`,
+// so a scanner no longer has to swallow its errors. The other is kept by
+// decision, not by limitation: `OpenAPIScanner`'s input is a document plus
+// options (`spec`, `include`, `exclude`, `base_path_prefix`,
+// `include_deprecated`, three optional hook closures), not a framework
+// application, and no consumer in the ecosystem dispatches over
+// `BaseScanner` implementations polymorphically. `axum-apcore`, the one
+// Rust adapter that serves a route scanner and an OpenAPI scanner behind a
+// single `dyn`, does so through its own scanner trait, binding the document
+// into its OpenAPI scanner at construction.
 //
-// This is a deliberate, documented gap — see
-// [`apcore-toolkit-rust#4`](https://github.com/aiperceivable/apcore-toolkit-rust/issues/4),
-// the tracked issue for evolving the trait to support this shape.
-// `OpenAPIScanner` instead exposes an inherent `scan` method, and reuses
+// `OpenAPIScanner` therefore exposes an inherent `scan` method, and reuses
 // the trait's free functions (`filter_modules`, `deduplicate_ids`,
 // `infer_annotations_from_method`) directly, exactly as they are designed
 // to be reused outside a `BaseScanner` impl.
@@ -44,9 +46,26 @@ const RECOGNIZED_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 
-static SANITIZE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[^A-Za-z0-9_.\-]").expect("valid regex"));
-static DOT_RUN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.+").expect("valid regex"));
+// `normalize_module_id` regexes. Every class is a literal ASCII range:
+// `\d`, `\w` and `(?i)` are Unicode-aware in the `regex` crate (and in at
+// least one of the Python / JavaScript engines), so they would let a
+// non-ASCII letter or digit through in one SDK only.
+static ACRONYM_BOUNDARY_RE: LazyLock<Regex> =
+    // `([A-Z])`, not `([A-Z]+)`, to match the spec text. The output is the
+    // same either way and the `regex` crate is linear-time for both; the spec
+    // pins this form because the `+` form is quadratic in backtracking engines.
+    LazyLock::new(|| Regex::new(r"([A-Z])([A-Z][a-z])").expect("valid regex"));
+static WORD_BOUNDARY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z])").expect("valid regex"));
+// In Unicode mode (the default) a negated class matches one whole code
+// point, so each non-ASCII character becomes exactly one `_`.
+static OUTSIDE_ID_ALPHABET_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^A-Za-z0-9_.]").expect("valid regex"));
+/// One segment of an apcore Canonical ID (PROTOCOL_SPEC §2.7). `^…$`
+/// without `(?m)` is a full match in the `regex` crate — unlike Python's
+/// `$`, it does not also accept a trailing newline.
+static LEGAL_SEGMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9_]*$").expect("valid regex"));
 static ABS_URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9+.\-]*://").expect("valid regex"));
 static TEMPLATE_VAR_RE: LazyLock<Regex> =
@@ -67,10 +86,71 @@ pub enum ScannerError {
     Pattern(#[from] regex::Error),
 }
 
-fn sanitize(candidate: &str) -> String {
-    let step1 = SANITIZE_RE.replace_all(candidate, "_");
-    let step2 = DOT_RUN_RE.replace_all(&step1, ".");
-    step2.trim_matches(|c| c == '.' || c == '_').to_string()
+/// Project `raw` into apcore's Canonical ID alphabet (`[a-z0-9_.]`),
+/// converting camelCase / PascalCase words to snake_case.
+///
+/// The algorithm is pinned byte-for-byte in
+/// `apcore-toolkit/docs/features/openapi-scanner.md` § `module_id`
+/// Derivation (`normalize_module_id`):
+///
+/// 1. insert `_` at word boundaries: acronym-before-word
+///    (`getHTTPResponse` → `getHTTP_Response`) and lower/digit-before-upper
+///    (→ `get_HTTP_Response`) — the two replacements commute;
+/// 2. replace every code point outside `[A-Za-z0-9_.]` with one `_`;
+/// 3. ASCII-lowercase — only ASCII is left after step 2, which is why
+///    lowercasing waits for it: U+212A KELVIN SIGN would otherwise
+///    lowercase to ASCII `k` and survive as a letter;
+/// 4. split on `.`, strip **leading** `_` from each segment, and drop
+///    segments left empty — runs of `_` and trailing `_` are kept;
+/// 5. rejoin with `.`.
+///
+/// A legal apcore module ID is returned unchanged
+/// (`read_item_items__item_id__get`, FastAPI's default `operationId`
+/// shape, is registrable as-is and stays so), and the function is
+/// idempotent on its own output. The result can be empty, and can still be
+/// illegal when a segment begins with a digit (`v1.2fa.post`) — repairing
+/// that would invent a name, so the scanner warns instead (see
+/// [`legality_warning`]).
+fn normalize_module_id(raw: &str) -> String {
+    // `${1}_${2}`, not `$1_$2`: the `regex` crate reads `$1_` as a group
+    // *named* `1_`, which does not exist and expands to the empty string.
+    let acronyms_split = ACRONYM_BOUNDARY_RE.replace_all(raw, "${1}_${2}");
+    let words_split = WORD_BOUNDARY_RE.replace_all(&acronyms_split, "${1}_${2}");
+    let in_alphabet = OUTSIDE_ID_ALPHABET_RE
+        .replace_all(&words_split, "_")
+        .to_ascii_lowercase();
+    in_alphabet
+        .split('.')
+        .map(|segment| segment.trim_start_matches('_'))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<&str>>()
+        .join(".")
+}
+
+/// The pinned warning for an emitted `module_id` that is still not a legal
+/// apcore ID after normalisation and deduplication, or `None` when it is
+/// legal.
+///
+/// Names the first `.`-segment failing `^[a-z][a-z0-9_]*$`; an empty ID
+/// has exactly one segment, the empty string. See "What normalisation will
+/// not repair" in `apcore-toolkit/docs/features/openapi-scanner.md`.
+fn legality_warning(module_id: &str) -> Option<String> {
+    let segment = module_id
+        .split('.')
+        .find(|segment| !LEGAL_SEGMENT_RE.is_match(segment))?;
+    Some(format!(
+        "module_id '{module_id}' is not a legal apcore module ID: segment '{segment}' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+    ))
+}
+
+/// Strip one enclosing `{`…`}` pair from a path-template segment
+/// (`{user_id}` → `user_id`); any other segment is returned unchanged.
+fn strip_template_braces(segment: &str) -> &str {
+    if segment.len() >= 2 && segment.starts_with('{') && segment.ends_with('}') {
+        &segment[1..segment.len() - 1]
+    } else {
+        segment
+    }
 }
 
 /// Derive a stable, byte-identical `module_id` for an OpenAPI operation.
@@ -84,41 +164,40 @@ fn sanitize(candidate: &str) -> String {
 /// - `method`: the HTTP method key as written in the document (e.g. `"get"`).
 /// - `operation`: the operation object, consulted only for `operationId`.
 ///
-/// Never empty — falls back to `"root.<method>"`.
+/// A non-empty `operationId` is converted to snake_case
+/// (`getUserById` → `get_user_by_id`) and loses any trailing `_`
+/// (`getUser_` → `get_user`, as V1's sanitiser did). That strip happens here
+/// only: the scanner's final normalisation keeps a trailing `_`, so a legal
+/// ID a hook returns (`abc_`) is never rewritten. Otherwise the ID is built from the
+/// path segments, each normalised on its own, plus the lowercased method
+/// (`/user-profiles/{userId}` + `get` → `user_profiles.user_id.get`). A
+/// path with no segment that survives normalisation (`/`, `/-`, `/{}`)
+/// falls back to `"root.<method>"`, so the result is never empty.
+///
+/// The result is a legal apcore module ID unless a segment begins with a
+/// digit (`/v1/2fa` → `v1.2fa.post`). This function does not warn about
+/// that; [`OpenAPIScanner::scan`] does.
 pub fn derive_module_id(path: &str, method: &str, operation: &Value) -> String {
     if let Some(operation_id) = operation.get("operationId").and_then(Value::as_str) {
-        if !operation_id.is_empty() {
-            let candidate = sanitize(operation_id);
-            if !candidate.is_empty() {
-                return candidate;
-            }
+        let normalized = normalize_module_id(operation_id);
+        let candidate = normalized.trim_end_matches('_');
+        if !candidate.is_empty() {
+            return candidate.to_string();
         }
     }
 
-    let raw_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if raw_segments.is_empty() {
-        return format!("root.{}", method.to_lowercase());
-    }
-
-    let segments: Vec<String> = raw_segments
-        .iter()
-        .map(|seg| {
-            if seg.len() >= 2 && seg.starts_with('{') && seg.ends_with('}') {
-                seg[1..seg.len() - 1].to_string()
-            } else {
-                (*seg).to_string()
-            }
-        })
+    let mut parts: Vec<String> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| normalize_module_id(strip_template_braces(segment)))
+        .filter(|part| !part.is_empty())
         .collect();
-
-    let mut candidate = segments.join(".");
-    candidate.push('.');
-    candidate.push_str(method);
-    let candidate = sanitize(&candidate.to_lowercase());
-    if candidate.is_empty() {
-        return format!("root.{}", method.to_lowercase());
+    let method = method.to_lowercase();
+    if parts.is_empty() {
+        return format!("root.{method}");
     }
-    candidate
+    parts.push(method);
+    parts.join(".")
 }
 
 fn collect_refs(node: &Value, out: &mut Vec<String>) {
@@ -248,9 +327,17 @@ fn resolve_server_url(spec: &Value) -> Option<String> {
 pub type TransformOperationHook = Box<dyn Fn(&str, &str, &Value) -> Option<Value> + Send + Sync>;
 /// A `derive_module_id` override hook: `(path, method, operation) -> Option<module_id>`.
 /// Returning `None` falls back to the default derivation.
+///
+/// The hook chooses the words; the scanner owns the alphabet. Whatever it
+/// returns is normalised like the default derivation
+/// (`"Custom-Space.GetThing"` is emitted as `custom_space.get_thing`); an
+/// ID that is already legal, trailing `_` included, is emitted unchanged.
 pub type DeriveModuleIdHook = Box<dyn Fn(&str, &str, &Value) -> Option<String> + Send + Sync>;
 /// A `transform_module` hook: `(module) -> Option<module>`. Returning
 /// `None` drops the module from the result.
+///
+/// Runs before the final `module_id` normalisation, so an ID it sets is
+/// normalised too.
 pub type TransformModuleHook = Box<dyn Fn(ScannedModule) -> Option<ScannedModule> + Send + Sync>;
 
 /// Options for [`OpenAPIScanner::scan`].
@@ -263,7 +350,9 @@ pub struct ScanOptions {
     /// Forwarded to [`filter_modules`].
     pub exclude: Option<String>,
     /// When set, prepended to every derived `module_id` as
-    /// `"<prefix>.<id>"`; applied before filtering and deduplication.
+    /// `"<prefix>.<id>"`; applied before filtering and deduplication. The
+    /// prefix is part of the final ID and is normalised with it
+    /// (`"Pet-Store"` → `pet_store.users.get`).
     pub base_path_prefix: Option<String>,
     /// When `false`, operations with `deprecated: true` are omitted
     /// entirely rather than annotated. Defaults to `true`.
@@ -324,12 +413,25 @@ impl OpenAPIScanner {
     /// Scan an OpenAPI document, returning one `ScannedModule` per
     /// recognised operation.
     ///
-    /// `scan` is `async fn` for API-shape consistency with the ecosystem
-    /// `Scanner` trait convention (see the module-level doc comment for
-    /// why `OpenAPIScanner` does not literally implement `BaseScanner`),
-    /// even though this implementation performs no `.await`ing
-    /// internally — the document is already parsed by the time it
-    /// arrives.
+    /// `scan` is `async fn` for API-shape consistency with the ecosystem's
+    /// `async fn scan` convention, even though this implementation performs
+    /// no `.await`ing internally — the document is already parsed by the
+    /// time it arrives. `OpenAPIScanner` is deliberately not a
+    /// [`BaseScanner`](crate::scanner::BaseScanner) impl: that trait's
+    /// `scan` is fallible too, but takes a framework application, while
+    /// this one takes a document plus options, and nothing dispatches over
+    /// `BaseScanner` implementations polymorphically (see the module-level
+    /// comment).
+    ///
+    /// Every emitted `module_id` has passed through the `module_id`
+    /// normalisation, applied after the `derive_module_id` hook,
+    /// `base_path_prefix` and the `transform_module` hook, and before
+    /// filtering and deduplication. An emitted ID that is still not a legal
+    /// apcore module ID (a segment beginning with a digit, or an empty ID
+    /// from a hook) is emitted anyway, with a warning naming it and its
+    /// offending segment; the check runs after deduplication, so it names
+    /// the ID actually emitted and follows any rename warning. The
+    /// consumer decides what to do with it.
     ///
     /// See `Contract: OpenAPIScanner.scan` in
     /// `apcore-toolkit/docs/features/openapi-scanner.md`.
@@ -494,13 +596,18 @@ impl OpenAPIScanner {
                 module.metadata = metadata;
                 module.warnings = warnings;
 
-                let module = match &options.transform_module {
+                let mut module = match &options.transform_module {
                     Some(hook) => match hook(module) {
                         Some(m) => m,
                         None => continue,
                     },
                     None => module,
                 };
+
+                // After the last hook, so the alphabet holds for a prefix or
+                // a hook's choice too, and before filtering and
+                // deduplication, so both see the ID that is emitted.
+                module.module_id = normalize_module_id(&module.module_id);
 
                 modules.push(module);
             }
@@ -511,7 +618,15 @@ impl OpenAPIScanner {
             options.include.as_deref(),
             options.exclude.as_deref(),
         )?;
-        Ok(deduplicate_ids(filtered))
+        let mut deduplicated = deduplicate_ids(filtered);
+        // Checked last, so the warning names the ID actually emitted —
+        // `3ds_2`, not `3ds`, for a renamed duplicate.
+        for module in &mut deduplicated {
+            if let Some(warning) = legality_warning(&module.module_id) {
+                module.warnings.push(warning);
+            }
+        }
+        Ok(deduplicated)
     }
 
     fn validate_spec(spec: &Value) -> Result<(), ScannerError> {
@@ -699,16 +814,322 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_operation_id_preserved() {
+    fn test_derive_operation_id_snake_case() {
         assert_eq!(
             derive_module_id("/users/{id}", "get", &json!({"operationId": "getUserById"})),
-            "getUserById"
+            "get_user_by_id"
         );
     }
 
     #[test]
-    fn test_derive_sanitize_illegal_chars() {
+    fn test_derive_illegal_chars_become_underscores() {
         assert_eq!(derive_module_id("/a b/c", "post", &json!({})), "a_b.c.post");
+    }
+
+    #[test]
+    fn test_derive_path_branch_normalised() {
+        assert_eq!(
+            derive_module_id("/user-profiles/{userId}", "get", &json!({})),
+            "user_profiles.user_id.get"
+        );
+        assert_eq!(
+            derive_module_id("/v1/_debug/", "get", &json!({})),
+            "v1.debug.get"
+        );
+        // Was `userprofiles.get` / `pets.petid.get`: 0.12.0 lowercased the
+        // path before any word boundary could be seen.
+        assert_eq!(
+            derive_module_id("/userProfiles", "get", &json!({})),
+            "user_profiles.get"
+        );
+        assert_eq!(
+            derive_module_id("/pets/{petId}", "get", &json!({})),
+            "pets.pet_id.get"
+        );
+        // Each segment is normalised on its own; interior and trailing `_`
+        // runs are kept, as they are in an `operationId`.
+        assert_eq!(
+            derive_module_id("/items__/{item_id}", "get", &json!({})),
+            "items__.item_id.get"
+        );
+    }
+
+    #[test]
+    fn test_derive_path_with_no_surviving_segment_is_root() {
+        for (path, method, want) in [
+            ("/", "get", "root.get"),
+            ("/-", "get", "root.get"),
+            ("/{}", "post", "root.post"),
+            ("/\u{1F600}", "get", "root.get"),
+            ("/_/-/{}", "delete", "root.delete"),
+        ] {
+            assert_eq!(
+                derive_module_id(path, method, &json!({})),
+                want,
+                "{method} {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_derive_uppercase_method_lowercased_in_both_branches() {
+        assert_eq!(derive_module_id("/users", "GET", &json!({})), "users.get");
+        assert_eq!(derive_module_id("/", "GET", &json!({})), "root.get");
+    }
+
+    #[test]
+    fn test_derive_digit_leading_segment_not_repaired() {
+        // Repairing it would invent a name; the scanner warns instead.
+        assert_eq!(
+            derive_module_id("/v1/2fa", "post", &json!({})),
+            "v1.2fa.post"
+        );
+        assert_eq!(
+            derive_module_id("/verify", "get", &json!({"operationId": "3ds"})),
+            "3ds"
+        );
+    }
+
+    #[test]
+    fn test_derive_operation_id_normalising_to_empty_falls_back_to_path() {
+        for operation_id in ["", "---", "__", "\u{212A}", "\u{1F600}"] {
+            assert_eq!(
+                derive_module_id("/users", "get", &json!({"operationId": operation_id})),
+                "users.get",
+                "operationId {operation_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_derive_operation_id_trailing_underscore_stripped() {
+        for (operation_id, want) in [
+            ("getUser_", "get_user"),
+            ("list-", "list"),
+            ("get_user__", "get_user"),
+            // The strip applies to the end of the ID, not to every segment.
+            ("Users_.Get_", "users_.get"),
+        ] {
+            assert_eq!(
+                derive_module_id("/x", "get", &json!({"operationId": operation_id})),
+                want,
+                "operationId {operation_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_derive_path_branch_keeps_trailing_underscore() {
+        assert_eq!(derive_module_id("/users_", "get", &json!({})), "users_.get");
+    }
+
+    #[test]
+    fn test_derive_non_string_operation_id_ignored() {
+        assert_eq!(
+            derive_module_id("/users", "get", &json!({"operationId": 42})),
+            "users.get"
+        );
+    }
+
+    // ---- normalize_module_id ----
+
+    #[test]
+    fn test_normalize_module_id_spec_worked_examples() {
+        for (raw, want) in [
+            ("getUserById", "get_user_by_id"),
+            ("listPets", "list_pets"),
+            ("createPets", "create_pets"),
+            ("showPetById", "show_pet_by_id"),
+            ("getHTTPResponse", "get_http_response"),
+            ("OAuth2Token", "o_auth2_token"),
+            ("list-pets", "list_pets"),
+        ] {
+            assert_eq!(normalize_module_id(raw), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_legal_id_unchanged() {
+        // FastAPI's default operationIds are legal and registrable as-is;
+        // normalisation must not rename them.
+        for id in [
+            "get_product_product__product_id__get",
+            "read_item_items__item_id__get",
+            "users.get",
+            "a_",
+            "a__b.c_",
+            "v1.pets.get",
+            "x9_.y",
+        ] {
+            assert_eq!(legality_warning(id), None, "fixture id {id:?} not legal");
+            assert_eq!(normalize_module_id(id), id, "legal id {id:?} changed");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_long_capital_run() {
+        // The spec pins `([A-Z])([A-Z][a-z])` because the `([A-Z]+)` form is
+        // quadratic in backtracking engines; the `regex` crate is linear for
+        // both, so this checks only that the `_` lands where the spec says.
+        let crafted = format!("{}b", "A".repeat(200_000));
+        let expected = format!("{}_ab", "a".repeat(199_999));
+        assert_eq!(normalize_module_id(&crafted), expected);
+    }
+
+    #[test]
+    fn test_normalize_module_id_acronym_boundaries() {
+        for (raw, want) in [
+            ("getUserID", "get_user_id"),
+            // A known ugly output, pinned rather than special-cased.
+            ("getIDs", "get_i_ds"),
+            ("ABCDef", "abc_def"),
+            ("HTTPSProxyURLParser", "https_proxy_url_parser"),
+            ("XMLHttpRequest", "xml_http_request"),
+            ("ID", "id"),
+            ("Users.GetUser", "users.get_user"),
+        ] {
+            assert_eq!(normalize_module_id(raw), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_digits() {
+        for (raw, want) in [
+            ("v2Items", "v2_items"),
+            ("item2", "item2"),
+            ("get2FA", "get2_fa"),
+            ("2fa", "2fa"),
+            ("v1.2fa.post", "v1.2fa.post"),
+        ] {
+            assert_eq!(normalize_module_id(raw), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_underscores_and_dots() {
+        for (raw, want) in [
+            // Only leading `_` is stripped; runs and trailing `_` stay.
+            ("__private__", "private__"),
+            ("a__b", "a__b"),
+            ("a  b", "a__b"),
+            ("getUser_", "get_user_"),
+            ("get_User", "get_user"),
+            ("_a_b__.c_", "a_b__.c_"),
+            // Empty segments are dropped.
+            ("x..y", "x.y"),
+            ("._a_._", "a_"),
+            ("..", ""),
+            ("", ""),
+            ("---", ""),
+        ] {
+            assert_eq!(normalize_module_id(raw), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_non_ascii_never_survives() {
+        for (raw, want) in [
+            // U+212A KELVIN SIGN lowercases to ASCII `k` under Unicode rules;
+            // lowercasing only after the alphabet step keeps it out.
+            ("get\u{212A}elvin", "get_elvin"),
+            ("\u{212A}", ""),
+            // U+017F LATIN SMALL LETTER LONG S: a case-insensitive `[a-z]`
+            // would accept it.
+            ("\u{17F}ort", "ort"),
+            // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE.
+            ("\u{130}stanbul", "stanbul"),
+            // U+0663 ARABIC-INDIC DIGIT THREE: `\d` would accept it.
+            ("v\u{663}", "v_"),
+            ("caf\u{E9}", "caf_"),
+            // Astral: one code point, so exactly one `_` (two UTF-16 code
+            // units, which a non-Unicode JavaScript regex would turn into
+            // `__`).
+            ("\u{1F600}emoji", "emoji"),
+            ("a\u{1F600}b", "a_b"),
+        ] {
+            assert_eq!(normalize_module_id(raw), want, "input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_module_id_output_alphabet_and_idempotence() {
+        let inputs = [
+            "getUserById",
+            "getHTTPResponse",
+            "OAuth2Token",
+            "getIDs",
+            "list-pets",
+            "Custom-Space.GetThing",
+            "Pet-Store.users.get",
+            "__private__",
+            "x..y",
+            "a b/c{d}",
+            "get\u{212A}elvin",
+            "\u{1F600}emoji",
+            "v1.2fa.post",
+            "already_snake.case",
+            "getUser_",
+            "__a__.__b__",
+            "caf\u{E9}",
+            "",
+        ];
+        for raw in inputs {
+            let once = normalize_module_id(raw);
+            assert_eq!(normalize_module_id(&once), once, "not idempotent: {raw:?}");
+            assert!(
+                once.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.'),
+                "{raw:?} -> {once:?} left the alphabet"
+            );
+            if !once.is_empty() {
+                assert!(
+                    once.split('.')
+                        .all(|segment| !segment.is_empty() && !segment.starts_with('_')),
+                    "{raw:?} -> {once:?} has an empty or `_`-leading segment"
+                );
+            }
+        }
+    }
+
+    // ---- legality_warning ----
+
+    #[test]
+    fn test_legality_warning_none_for_legal_ids() {
+        for id in [
+            "users.get",
+            "get_user_by_id",
+            "v1.pets.get",
+            "a",
+            "a1_b2.c3",
+        ] {
+            assert_eq!(legality_warning(id), None, "id {id:?}");
+        }
+    }
+
+    #[test]
+    fn test_legality_warning_names_first_illegal_segment() {
+        assert_eq!(
+            legality_warning("v1.2fa.post").as_deref(),
+            Some(
+                "module_id 'v1.2fa.post' is not a legal apcore module ID: segment '2fa' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            )
+        );
+        assert_eq!(
+            legality_warning("3ds.4ds").as_deref(),
+            Some(
+                "module_id '3ds.4ds' is not a legal apcore module ID: segment '3ds' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            )
+        );
+    }
+
+    #[test]
+    fn test_legality_warning_empty_id_names_empty_segment() {
+        assert_eq!(
+            legality_warning("").as_deref(),
+            Some(
+                "module_id '' is not a legal apcore module ID: segment '' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            )
+        );
     }
 
     // ---- OpenAPIScanner::scan ----
@@ -772,6 +1193,198 @@ mod tests {
     #[test]
     fn test_get_source_name() {
         assert_eq!(OpenAPIScanner::new().get_source_name(), "openapi");
+    }
+
+    fn spec_with_paths(paths: Value) -> Value {
+        json!({
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1.0.0"},
+            "paths": paths
+        })
+    }
+
+    fn ok_response() -> Value {
+        json!({"200": {"description": "ok"}})
+    }
+
+    fn scan_ids(spec: &Value, options: &ScanOptions) -> Vec<String> {
+        block_on(OpenAPIScanner::new().scan(spec, options))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.module_id)
+            .collect()
+    }
+
+    #[test]
+    fn test_scan_operation_id_normalised_raw_value_kept_in_metadata() {
+        let spec = spec_with_paths(json!({
+            "/pets": {"get": {"operationId": "listPets", "responses": ok_response()}}
+        }));
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &ScanOptions::new())).unwrap();
+        assert_eq!(modules[0].module_id, "list_pets");
+        assert!(modules[0].warnings.is_empty());
+        assert_eq!(
+            modules[0].metadata["openapi"]["operation_id"],
+            json!("listPets")
+        );
+    }
+
+    #[test]
+    fn test_scan_prefix_normalised_with_id() {
+        let spec = spec_with_paths(json!({"/users": {"get": {"responses": ok_response()}}}));
+        let options = ScanOptions {
+            base_path_prefix: Some("Pet-Store".to_string()),
+            ..ScanOptions::new()
+        };
+        assert_eq!(scan_ids(&spec, &options), vec!["pet_store.users.get"]);
+    }
+
+    #[test]
+    fn test_scan_derive_hook_output_normalised() {
+        let spec = spec_with_paths(json!({"/widgets": {"get": {"responses": ok_response()}}}));
+        let options = ScanOptions {
+            derive_module_id: Some(Box::new(|_, _, _| {
+                Some("Custom-Space.GetThing".to_string())
+            })),
+            ..ScanOptions::new()
+        };
+        assert_eq!(scan_ids(&spec, &options), vec!["custom_space.get_thing"]);
+    }
+
+    #[test]
+    fn test_scan_legal_hook_id_never_rewritten() {
+        // A trailing `_` is stripped only from an `operationId`; the final
+        // normalisation leaves a legal ID a hook chose exactly as it is.
+        let spec = spec_with_paths(json!({"/widgets": {"get": {"responses": ok_response()}}}));
+        let options = ScanOptions {
+            derive_module_id: Some(Box::new(|_, _, _| Some("abc_.x__y_".to_string()))),
+            ..ScanOptions::new()
+        };
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &options)).unwrap();
+        assert_eq!(modules[0].module_id, "abc_.x__y_");
+        assert!(modules[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn test_scan_transform_module_output_normalised() {
+        let spec = spec_with_paths(json!({"/widgets": {"get": {"responses": ok_response()}}}));
+        let options = ScanOptions {
+            transform_module: Some(Box::new(|mut module| {
+                module.module_id = format!("Renamed-By.{}", module.module_id);
+                Some(module)
+            })),
+            ..ScanOptions::new()
+        };
+        assert_eq!(scan_ids(&spec, &options), vec!["renamed_by.widgets.get"]);
+    }
+
+    #[test]
+    fn test_scan_include_matches_normalised_id() {
+        let spec = spec_with_paths(json!({
+            "/users/{id}": {"get": {"operationId": "getUserById", "responses": ok_response()}},
+            "/pets": {"get": {"operationId": "listPets", "responses": ok_response()}}
+        }));
+        let options = ScanOptions {
+            include: Some("^get_user_by_id$".to_string()),
+            ..ScanOptions::new()
+        };
+        assert_eq!(scan_ids(&spec, &options), vec!["get_user_by_id"]);
+    }
+
+    #[test]
+    fn test_scan_collision_created_by_normalisation_resolved_by_dedup() {
+        let spec = spec_with_paths(json!({
+            "/a": {"get": {"operationId": "listPets", "responses": ok_response()}},
+            "/b": {"get": {"operationId": "list-pets", "responses": ok_response()}}
+        }));
+        assert_eq!(
+            scan_ids(&spec, &ScanOptions::new()),
+            vec!["list_pets", "list_pets_2"]
+        );
+    }
+
+    #[test]
+    fn test_scan_illegal_id_emitted_with_legality_warning() {
+        let spec = spec_with_paths(json!({"/v1/2fa": {"post": {"responses": ok_response()}}}));
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &ScanOptions::new())).unwrap();
+        assert_eq!(modules.len(), 1, "an illegal ID is still emitted");
+        assert_eq!(modules[0].module_id, "v1.2fa.post");
+        assert_eq!(
+            modules[0].warnings,
+            vec![
+                "module_id 'v1.2fa.post' is not a legal apcore module ID: segment '2fa' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_scan_hook_empty_id_emitted_with_legality_warning() {
+        let spec = spec_with_paths(json!({"/widgets": {"get": {"responses": ok_response()}}}));
+        let options = ScanOptions {
+            derive_module_id: Some(Box::new(|_, _, _| Some("--".to_string()))),
+            ..ScanOptions::new()
+        };
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &options)).unwrap();
+        assert_eq!(modules[0].module_id, "");
+        assert_eq!(
+            modules[0].warnings,
+            vec![
+                "module_id '' is not a legal apcore module ID: segment '' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_scan_legality_warning_names_deduplicated_id_after_rename_warning() {
+        let spec = spec_with_paths(json!({
+            "/a": {"get": {"operationId": "3ds", "responses": ok_response()}},
+            "/b": {"get": {"operationId": "3ds", "responses": ok_response()}}
+        }));
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &ScanOptions::new())).unwrap();
+        assert_eq!(modules[0].module_id, "3ds");
+        assert_eq!(
+            modules[0].warnings,
+            vec![
+                "module_id '3ds' is not a legal apcore module ID: segment '3ds' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook"
+            ]
+        );
+        assert_eq!(modules[1].module_id, "3ds_2");
+        assert_eq!(
+            modules[1].warnings,
+            vec![
+                "Module ID renamed from '3ds' to '3ds_2' to avoid collision",
+                "module_id '3ds_2' is not a legal apcore module ID: segment '3ds_2' must match ^[a-z][a-z0-9_]*$; name this operation with a derive_module_id or transform_module hook",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_scan_legality_not_checked_on_filtered_out_modules() {
+        let spec = spec_with_paths(json!({
+            "/v1/2fa": {"post": {"responses": ok_response()}},
+            "/users": {"get": {"responses": ok_response()}}
+        }));
+        let options = ScanOptions {
+            exclude: Some("2fa".to_string()),
+            ..ScanOptions::new()
+        };
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &options)).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].module_id, "users.get");
+        assert!(modules[0].warnings.is_empty());
+    }
+
+    #[test]
+    fn test_scan_fastapi_operation_id_passes_through_unchanged() {
+        let spec = spec_with_paths(json!({
+            "/items/{item_id}": {"get": {
+                "operationId": "read_item_items__item_id__get",
+                "responses": ok_response()
+            }}
+        }));
+        let modules = block_on(OpenAPIScanner::new().scan(&spec, &ScanOptions::new())).unwrap();
+        assert_eq!(modules[0].module_id, "read_item_items__item_id__get");
+        assert!(modules[0].warnings.is_empty());
     }
 
     // ---- load_spec ----

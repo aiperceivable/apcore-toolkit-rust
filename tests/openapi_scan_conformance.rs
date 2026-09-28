@@ -9,10 +9,15 @@
 // output is compared field-by-field rather than byte-for-byte. See
 // `apcore-toolkit/docs/features/openapi-scanner.md`.
 //
-// Fixture cases `openapi_scan_021` through `openapi_scan_023` install a
-// named test-only hook from `install_hook` below — the fixture's
-// `input.hooks` key names which one, so all three SDKs install
-// byte-identical hook behavior without serializing a closure through JSON.
+// Fixture cases `openapi_scan_021` through `openapi_scan_023`,
+// `openapi_scan_029` and `openapi_scan_032` install a named test-only hook
+// from `install_hook` below — the fixture's `input.hooks` key names which
+// one, so all three SDKs install byte-identical hook behavior without
+// serializing a closure through JSON.
+//
+// The fixture is read from the sibling spec repository
+// (`../apcore-toolkit`), never from a vendored copy, so a spec change is
+// exercised here the moment it is written.
 
 use std::path::PathBuf;
 
@@ -38,12 +43,19 @@ fn load_cases() -> Vec<Value> {
         }
     };
     let doc: Value = serde_json::from_str(&content).expect("fixture must be valid JSON");
-    doc["test_cases"].as_array().cloned().unwrap_or_default()
+    let cases = doc["test_cases"].as_array().cloned().unwrap_or_default();
+    // A fixture that is present but yields no cases would otherwise pass
+    // this test without asserting anything.
+    assert!(
+        !cases.is_empty(),
+        "conformance fixture at {path:?} has no test_cases"
+    );
+    cases
 }
 
 /// Install the one named hook this fixture case requires (`hook_key` is
 /// `"transform_operation"` or `"derive_module_id"`; `hook_name` is one of
-/// the three fixed names below). Mirrors
+/// the five fixed names below). Mirrors
 /// `apcore-toolkit-python/tests/test_openapi_scan_conformance.py`'s
 /// `_HOOKS` table exactly.
 fn install_hook(options: &mut ScanOptions, hook_key: &str, hook_name: &str) {
@@ -73,6 +85,16 @@ fn install_hook(options: &mut ScanOptions, hook_key: &str, hook_name: &str) {
         ("derive_module_id", "always_returns_dup_op") => {
             options.derive_module_id = Some(Box::new(|_path, _method, _operation| {
                 Some("dup.op".to_string())
+            }));
+        }
+        ("derive_module_id", "always_returns_mixed_case_id") => {
+            options.derive_module_id = Some(Box::new(|_path, _method, _operation| {
+                Some("Custom-Space.GetThing".to_string())
+            }));
+        }
+        ("derive_module_id", "always_returns_legal_trailing_underscore_id") => {
+            options.derive_module_id = Some(Box::new(|_path, _method, _operation| {
+                Some("abc_".to_string())
             }));
         }
         _ => panic!("unknown test hook: {hook_key} -> {hook_name}"),
