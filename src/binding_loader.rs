@@ -20,6 +20,37 @@ use crate::types::ScannedModule;
 
 const SUPPORTED_SPEC_VERSIONS: &[&str] = &["1.0"];
 
+/// The closed binding-document surface supported by this pure-data loader.
+///
+/// Runtime binding modes such as `auto_schema` and `schema_ref` are omitted:
+/// accepting either without resolving schemas would silently create a module
+/// with permissive empty schemas. This loader intentionally never imports or
+/// resolves a target.
+const ALLOWED_DOCUMENT_KEYS: &[&str] = &["spec_version", "bindings"];
+
+/// The closed binding-entry surface supported by this toolkit.
+///
+/// This includes every field the loader has historically preserved from a
+/// [`ScannedModule`], including toolkit data (`suggested_alias`, `examples`,
+/// and `warnings`). It deliberately excludes apcore runtime-only schema
+/// sources (`auto_schema`, `schema_ref`) because this loader is pure data.
+const ALLOWED_ENTRY_KEYS: &[&str] = &[
+    "module_id",
+    "target",
+    "description",
+    "documentation",
+    "input_schema",
+    "output_schema",
+    "annotations",
+    "tags",
+    "version",
+    "metadata",
+    "display",
+    "suggested_alias",
+    "examples",
+    "warnings",
+];
+
 /// Keys whose presence in a metadata dict is unsafe for cross-runtime
 /// round-trip — they correspond to JS prototype-pollution sinks. They are
 /// stripped at parse time so a malicious or malformed binding YAML cannot
@@ -233,8 +264,7 @@ impl BindingLoader {
     /// match** at whatever depth traversal reached. A caller never writes a
     /// `**/` prefix and the loader never synthesises one. When `path` names a
     /// file, `pattern` is ignored for *matching* — exactly like `recursive` —
-    /// but it is still *validated*: validation is a pure precondition on the
-    /// argument, not a step of the directory walk.
+    /// and no syntactic validation is performed: every string is valid.
     ///
     /// Directories are never candidates at any depth: a directory whose name
     /// matches `pattern` is skipped, not selected and then failed on at read
@@ -427,6 +457,16 @@ impl BindingLoader {
                 reason: "top-level binding document must be a mapping".into(),
             })?;
 
+        if let Some(key) = obj
+            .keys()
+            .find(|key| !ALLOWED_DOCUMENT_KEYS.contains(&key.as_str()))
+        {
+            return Err(BindingLoadError::InvalidStructure {
+                path: file_path.map(String::from),
+                reason: format!("unknown top-level binding document key: {key}"),
+            });
+        }
+
         Self::check_spec_version(obj.get("spec_version"), file_path);
 
         let bindings = obj
@@ -477,6 +517,25 @@ impl BindingLoader {
         file_path: Option<&str>,
         strict: bool,
     ) -> Result<ScannedModule, BindingLoadError> {
+        if let Some(key) = entry
+            .keys()
+            .find(|key| !ALLOWED_ENTRY_KEYS.contains(&key.as_str()))
+        {
+            return Err(BindingLoadError::InvalidStructure {
+                path: file_path.map(String::from),
+                reason: format!("unknown binding entry key: {key}"),
+            });
+        }
+
+        let has_input_schema = entry.contains_key("input_schema");
+        let has_output_schema = entry.contains_key("output_schema");
+        if has_input_schema != has_output_schema {
+            return Err(BindingLoadError::InvalidStructure {
+                path: file_path.map(String::from),
+                reason: "input_schema and output_schema must be supplied together".into(),
+            });
+        }
+
         let required: &[&str] = if strict {
             &["module_id", "target", "input_schema", "output_schema"]
         } else {
@@ -545,17 +604,26 @@ impl BindingLoader {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let input_schema = entry
-            .get("input_schema")
-            .filter(|v| !v.is_null())
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let input_schema =
+            Self::parse_schema(entry.get("input_schema"), "input_schema", &module_id);
+        let output_schema =
+            Self::parse_schema(entry.get("output_schema"), "output_schema", &module_id);
 
-        let output_schema = entry
-            .get("output_schema")
-            .filter(|v| !v.is_null())
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        if let Some(value) = entry
+            .get("tags")
+            .filter(|value| !value.is_null() && !value.is_array())
+        {
+            if strict {
+                return Err(BindingLoadError::InvalidStructure {
+                    path: file_path.map(String::from),
+                    reason: format!("tags for module {module_id} must be a list"),
+                });
+            }
+            warn!(
+                "BindingLoader: tags for module {} is not a list ({}); using empty []",
+                module_id, value
+            );
+        }
 
         let tags: Vec<String> = entry
             .get("tags")
@@ -619,6 +687,20 @@ impl BindingLoader {
             display,
             warnings,
         })
+    }
+
+    fn parse_schema(value: Option<&Value>, field: &str, module_id: &str) -> Value {
+        match value {
+            Some(value) if value.is_object() => value.clone(),
+            None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+            Some(_) => {
+                warn!(
+                    "BindingLoader: {} for module {} is not an object; using empty {{}}",
+                    field, module_id
+                );
+                Value::Object(serde_json::Map::new())
+            }
+        }
     }
 
     fn parse_display(value: Option<&Value>, module_id: &str) -> Option<Value> {
@@ -856,6 +938,70 @@ mod tests {
             err,
             BindingLoadError::InvalidStructure { ref reason, .. } if reason.contains("mapping")
         ));
+    }
+
+    #[test]
+    fn test_unknown_top_level_key_is_rejected() {
+        let loader = BindingLoader::new();
+        for strict in [false, true] {
+            let err = loader
+                .load_data(
+                    &json!({"bindings": [minimal_entry()], "bindingz": []}),
+                    strict,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                BindingLoadError::InvalidStructure { ref reason, .. }
+                    if reason.contains("unknown top-level") && reason.contains("bindingz")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_unknown_binding_entry_key_is_rejected() {
+        let loader = BindingLoader::new();
+        for strict in [false, true] {
+            let err = loader
+                .load_data(
+                    &json!({"bindings": [{"module_id": "x", "target": "p:f", "targte": "typo"}]}),
+                    strict,
+                )
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                BindingLoadError::InvalidStructure { ref reason, .. }
+                    if reason.contains("unknown binding entry") && reason.contains("targte")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_one_sided_schema_pair_is_rejected_in_loose_and_strict_modes() {
+        let loader = BindingLoader::new();
+        for entry in [
+            json!({
+                "module_id": "x",
+                "target": "p:f",
+                "input_schema": {"type": "object"}
+            }),
+            json!({
+                "module_id": "x",
+                "target": "p:f",
+                "output_schema": {"type": "object"}
+            }),
+        ] {
+            for strict in [false, true] {
+                let err = loader
+                    .load_data(&json!({"bindings": [entry]}), strict)
+                    .unwrap_err();
+                assert!(matches!(
+                    err,
+                    BindingLoadError::InvalidStructure { ref reason, .. }
+                        if reason.contains("input_schema and output_schema")
+                ));
+            }
+        }
     }
 
     #[test]

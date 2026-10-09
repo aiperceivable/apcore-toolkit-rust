@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-10-09
+
+Toolkit update for apcore 0.32.0. Public loader signatures and error types
+are unchanged, but binding-file validation is stricter.
+
+### Changed
+
+- Required `apcore` dependency floor raised to `0.32.0`; lockfile updated.
+
+### Breaking
+
+- Binding documents reject unknown top-level or entry keys and one-sided
+  inline schema pairs in both loose and strict modes, aligned with apcore
+  0.32.0. Runtime-only `auto_schema` and `schema_ref` remain unsupported by
+  this pure-data loader. Public method signatures and error types are unchanged.
+  **Migration:** remove unsupported keys, move application-specific entry
+  data into `metadata`, and provide both `input_schema` and `output_schema`
+  (or neither in loose mode). Use apcore's runtime loader for runtime schema sources.
+- Strict mode rejects non-list `tags` instead of silently accepting them.
+  Loose mode warns and defaults to `[]`.
+
+### Fixed
+
+- Malformed inline schemas now warn and default to `{}` in loose mode.
+- Non-list `tags` now raise in strict mode and warn and default to `[]` in
+  loose mode, matching Python and TypeScript.
+
+### Added
+
+- Shared binding-structure conformance tests: 18 cases in both strict and
+  loose modes through in-memory parsing and YAML file loading.
+- CI checks out canonical fixtures from `apcore-toolkit`'s `main` and fails
+  with publication-order guidance if the binding-structure corpus is missing.
+  Publish the corpus before merging the SDK changes.
+
 
 ## [0.13.0] - 2026-09-28
 

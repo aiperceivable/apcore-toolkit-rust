@@ -13,6 +13,9 @@ jobs:
   test:
     name: Test on Rust ${{ matrix.rust }}
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apcore-toolkit-rust
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +24,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: apcore-toolkit-rust
+
+      - name: Checkout canonical conformance fixtures
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: aiperceivable/apcore-toolkit
+          ref: main
+          path: apcore-toolkit
+
+      - name: Verify binding-structure fixture
+        run: |
+          if [ ! -s ../apcore-toolkit/conformance/fixtures/binding_structure.json ]; then
+            echo "::error::Publish the binding-structure fixture to apcore-toolkit main before merging this SDK change."
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -34,7 +53,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            apcore-toolkit-rust/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
