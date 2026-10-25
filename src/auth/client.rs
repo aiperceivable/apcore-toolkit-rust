@@ -21,7 +21,7 @@ use crate::auth::parse::{read_string, RequestKind};
 use crate::auth::request::{prepare_request, refresh_params, revoke_params};
 use crate::auth::store::{NullTokenStore, TokenStore};
 use crate::auth::token::{TokenSet, DEFAULT_SKEW_SECONDS};
-use crate::auth::transport::{ReqwestTransport, SharedTransport};
+use crate::auth::transport::SharedTransport;
 
 /// A synchronous header factory, matching the `auth_header_factory` signature
 /// `HTTPProxyRegistryWriter` already accepts.
@@ -79,18 +79,7 @@ impl DeviceAuthClient {
     ) -> Result<Self, DeviceAuthError> {
         config.validate()?;
         let key = config.store_key();
-        let transport: SharedTransport = match &config.hooks.http_client {
-            Some(client) => client.clone(),
-            None => match config.http_timeout_seconds {
-                Some(seconds) if seconds.is_finite() && seconds > 0.0 => Arc::new(
-                    ReqwestTransport::with_timeout(std::time::Duration::from_secs_f64(seconds))
-                        .map_err(|e| {
-                            DeviceAuthError::Config(format!("failed to build HTTP client: {e}"))
-                        })?,
-                ),
-                _ => Arc::new(ReqwestTransport::default()),
-            },
-        };
+        let transport = config.transport()?;
         Ok(Self {
             runtime: AuthRuntime {
                 config,

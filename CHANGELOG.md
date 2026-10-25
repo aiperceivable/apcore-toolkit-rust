@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.1] - 2026-10-25
+
+### Fixed
+
+- HTTP proxy modules now observe Context cancellation before sending and throughout response-body reads, including inherited cancellation and error responses. Cancellation drops the request future without detached HTTP work.
+- Preserve reqwest's request-wide body timeout and report body transport failures as HTTP errors instead of JSON parse failures or empty HTTP error messages.
+- Discovery now applies the configured per-request HTTP timeout, including response-body reads and fallback candidates.
+- Device authorization HTTP deadlines use a separate, cancellable runtime-independent timer, preserving injected polling sleeps and fake clocks when transports yield or retry.
+- Device authorization polling now caps each sleep and in-flight token request to the remaining flow lifetime, rejects late responses, and drops pending transport work at expiry. The optional per-request HTTP timeout remains independent.
+
 ## [0.14.0] - 2026-10-09
 
 Toolkit update for apcore 0.32.0. Public loader signatures and error types

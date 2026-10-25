@@ -48,9 +48,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apcore"
-version = "0.32.0"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5546339f5c8ca488544c2e891ff033eb75aa894c562bbabfdeaa8f73b0097013"
+checksum = "53e2d064d713fbcdded65292833766c1bc32bf36ea06e8c503d85932e014ea04"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -61,6 +61,7 @@ dependencies = [
  "jsonschema",
  "notify",
  "parking_lot",
+ "referencing",
  "regex",
  "schemars",
  "serde",
@@ -75,12 +76,13 @@ dependencies = [
 
 [[package]]
 name = "apcore-toolkit"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "apcore",
  "async-trait",
  "chrono",
  "futures",
+ "futures-timer",
  "indexmap",
  "regex",
  "reqwest",
@@ -582,6 +584,12 @@ name = "futures-task"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f288b0a4f20f9a56b5d1da57e2227c661b7b16168e2f72365f57b63326e29b24"
 
 [[package]]
 name = "futures-util"

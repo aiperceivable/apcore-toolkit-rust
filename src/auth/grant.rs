@@ -13,8 +13,10 @@
 // runnable with no HTTP mocking at all.
 
 use std::collections::HashMap;
+use std::future::{poll_fn, Future};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -290,6 +292,7 @@ impl DeviceCodeGrant {
         // loop. The consumer and the loop therefore cannot disagree about when
         // the flow gives up -- which is the whole point of reporting a
         // resolved number rather than the raw wire value.
+        let start = (runtime.clock)();
         let deadline = poll_deadline(authorization.expires_in, callbacks.timeout_seconds);
 
         notify(
@@ -302,7 +305,7 @@ impl DeviceCodeGrant {
             },
         );
 
-        self.poll(runtime, &authorization, callbacks, deadline)
+        self.poll(runtime, &authorization, callbacks, deadline, start)
             .await
     }
 
@@ -396,6 +399,7 @@ impl DeviceCodeGrant {
         authorization: &DeviceAuthorization,
         callbacks: &LoginCallbacks,
         deadline: Duration,
+        start: Instant,
     ) -> (Result<TokenSet, DeviceAuthError>, PollSummary) {
         let config = &runtime.config;
         let token_endpoint = match config.token_endpoint.as_ref() {
@@ -418,7 +422,6 @@ impl DeviceCodeGrant {
                 .unwrap_or(config.default_interval)
                 .max(1),
         );
-        let start = (runtime.clock)();
         let mut summary = PollSummary {
             polls_made: 0,
             final_interval: interval,
@@ -428,7 +431,17 @@ impl DeviceCodeGrant {
         loop {
             // RFC 8628 section 3.5: wait BEFORE the first poll. An eager first
             // request races the user, who has not yet visited the URI.
-            (runtime.sleep)(interval).await;
+            let elapsed = (runtime.clock)().saturating_duration_since(start);
+            summary.elapsed = elapsed;
+            if elapsed >= deadline {
+                return (
+                    Err(DeviceAuthError::AuthorizationExpired(
+                        ExpiryCause::DeadlineElapsed,
+                    )),
+                    summary,
+                );
+            }
+            (runtime.sleep)(interval.min(deadline - elapsed)).await;
             let elapsed = (runtime.clock)().saturating_duration_since(start);
             summary.final_interval = interval;
             summary.elapsed = elapsed;
@@ -445,11 +458,10 @@ impl DeviceCodeGrant {
                 );
             }
 
-            summary.polls_made += 1;
             notify(
                 callbacks.on_poll.as_ref(),
                 &PollEvent {
-                    attempt: summary.polls_made,
+                    attempt: summary.polls_made + 1,
                     interval,
                     elapsed,
                 },
@@ -460,26 +472,81 @@ impl DeviceCodeGrant {
                 RequestKind::Token,
                 token_params(&authorization.device_code),
             );
-            let response = match runtime
-                .transport
-                .post(
-                    &token_endpoint,
-                    &to_header_map(&request.headers),
-                    request.body,
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(e) => {
-                    // Retryable, not terminal: a dropped connection mid-flow is
-                    // common on flaky networks and the deadline already bounds
-                    // the total wait.
-                    warn!(error = %e, "device auth: transport failure while polling, retrying");
+            let elapsed = (runtime.clock)().saturating_duration_since(start);
+            summary.elapsed = elapsed;
+            if elapsed >= deadline {
+                return (
+                    Err(DeviceAuthError::AuthorizationExpired(
+                        ExpiryCause::DeadlineElapsed,
+                    )),
+                    summary,
+                );
+            }
+            summary.polls_made += 1;
+            let headers = to_header_map(&request.headers);
+            let mut response =
+                std::pin::pin!(runtime
+                    .transport
+                    .post(&token_endpoint, &headers, request.body));
+            // Polling sleep is a protocol seam: injected implementations can
+            // record delays and advance a fake clock. The HTTP watchdog must
+            // use an independent, runtime-agnostic timer that unregisters on Drop.
+            let mut expires = std::pin::pin!(async {
+                let remaining =
+                    deadline.saturating_sub((runtime.clock)().saturating_duration_since(start));
+                futures_timer::Delay::new(remaining).await
+            });
+            let response = poll_fn(|cx| {
+                if (runtime.clock)().saturating_duration_since(start) >= deadline {
+                    return Poll::Ready(None);
+                }
+                if let Poll::Ready(result) = response.as_mut().poll(cx) {
+                    return Poll::Ready(Some(result));
+                }
+                if (runtime.clock)().saturating_duration_since(start) >= deadline
+                    || expires.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(None);
+                }
+                Poll::Pending
+            })
+            .await;
+            summary.elapsed = (runtime.clock)().saturating_duration_since(start);
+            if summary.elapsed >= deadline {
+                return (
+                    Err(DeviceAuthError::AuthorizationExpired(
+                        ExpiryCause::DeadlineElapsed,
+                    )),
+                    summary,
+                );
+            }
+            let response = match response {
+                Some(Ok(response)) => response,
+                Some(Err(error)) => {
+                    warn!(error = %error, "device auth: transport failure while polling, retrying");
                     continue;
+                }
+                None => {
+                    return (
+                        Err(DeviceAuthError::AuthorizationExpired(
+                            ExpiryCause::DeadlineElapsed,
+                        )),
+                        summary,
+                    )
                 }
             };
 
-            match self.dispatch(config, &response) {
+            let dispatch = self.dispatch(config, &response);
+            summary.elapsed = (runtime.clock)().saturating_duration_since(start);
+            if summary.elapsed >= deadline {
+                return (
+                    Err(DeviceAuthError::AuthorizationExpired(
+                        ExpiryCause::DeadlineElapsed,
+                    )),
+                    summary,
+                );
+            }
+            match dispatch {
                 Dispatch::Success(tokens) => {
                     let mut tokens = tokens;
                     let now = unix_seconds((runtime.wall_clock)());
@@ -721,6 +788,456 @@ mod tests {
 
     fn body(raw: &str) -> ParsedBody {
         decode_body(Some("application/json"), raw).expect("decodes")
+    }
+
+    struct PendingTokenTransport(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait]
+    impl crate::auth::transport::HttpTransport for PendingTokenTransport {
+        async fn post(
+            &self,
+            url: &str,
+            _headers: &HashMap<String, String>,
+            _body: crate::auth::transport::RequestBody,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            if url.ends_with("/device") {
+                return Ok(HttpResponse {
+                    status: 200, content_type: Some("application/json".into()),
+                    body: r#"{"device_code":"dc","user_code":"uc","verification_uri":"https://example.com/device","expires_in":600,"interval":1}"#.into(),
+                });
+            }
+            struct MarkDropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for MarkDropped {
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = MarkDropped(self.0.clone());
+            std::future::pending().await
+        }
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &HashMap<String, String>,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            unreachable!()
+        }
+    }
+
+    fn pending_runtime(
+        sleep: SleepFn,
+    ) -> (AuthRuntime, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut config = DeviceAuthConfig::new("test");
+        config.token_endpoint = Some("https://example.com/token".into());
+        config.device_authorization_endpoint = Some("https://example.com/device".into());
+        (
+            AuthRuntime {
+                config,
+                transport: Arc::new(PendingTokenTransport(dropped.clone())),
+                clock: system_clock(),
+                sleep,
+                wall_clock: system_wall_clock(),
+            },
+            dropped,
+        )
+    }
+
+    fn authorization() -> DeviceAuthorization {
+        DeviceAuthorization {
+            device_code: "dc".into(),
+            user_code: "uc".into(),
+            verification_uri: "https://example.com/device".into(),
+            verification_uri_complete: None,
+            expires_in: 600,
+            interval: Some(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_caps_initial_sleep() {
+        let (runtime, dropped) = pending_runtime(system_sleep());
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(200),
+            DeviceCodeGrant.poll(
+                &runtime,
+                &authorization(),
+                &LoginCallbacks::default(),
+                Duration::from_millis(40),
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("the first polling interval must not overrun the deadline");
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.polls_made, 0);
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_drops_an_in_flight_transport_request() {
+        let sleeps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sleep: SleepFn = Arc::new(move |duration| {
+            if sleeps.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Box::pin(async {})
+            } else {
+                Box::pin(tokio::time::sleep(duration))
+            }
+        });
+        let (runtime, dropped) = pending_runtime(sleep);
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(200),
+            DeviceCodeGrant.poll(
+                &runtime,
+                &authorization(),
+                &LoginCallbacks::default(),
+                Duration::from_millis(50),
+                Instant::now(),
+            ),
+        )
+        .await
+        .expect("the deadline must interrupt a pending transport future");
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.polls_made, 1);
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the HTTP future must be dropped, not detached"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_includes_user_code_callback_time() {
+        let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let clock = now.clone();
+        let (mut runtime, dropped) =
+            pending_runtime(Arc::new(|_| panic!("expired flow must not sleep")));
+        runtime.clock = Arc::new(move || *clock.lock().unwrap());
+        let callbacks = LoginCallbacks {
+            timeout_seconds: Some(1.0),
+            on_user_code: Some(Arc::new(move |_| {
+                *now.lock().unwrap() += Duration::from_secs(2);
+            })),
+            ..Default::default()
+        };
+        let outcome = DeviceCodeGrant.run(&runtime, &callbacks).await;
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.polls_made, 0);
+        assert_eq!(outcome.1.elapsed, Duration::from_secs(2));
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    struct LateTokenTransport(Arc<std::sync::Mutex<Instant>>, Duration);
+
+    #[async_trait]
+    impl crate::auth::transport::HttpTransport for LateTokenTransport {
+        async fn post(
+            &self,
+            _url: &str,
+            _headers: &HashMap<String, String>,
+            _body: crate::auth::transport::RequestBody,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            *self.0.lock().unwrap() += self.1;
+            Ok(HttpResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                body: r#"{"access_token":"late"}"#.into(),
+            })
+        }
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &HashMap<String, String>,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            unreachable!()
+        }
+    }
+
+    fn advancing_runtime() -> (AuthRuntime, Arc<std::sync::Mutex<Instant>>) {
+        let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let clock = now.clone();
+        let sleeper = now.clone();
+        let (mut runtime, _) = pending_runtime(Arc::new(move |duration| {
+            *sleeper.lock().unwrap() += duration;
+            Box::pin(async {})
+        }));
+        runtime.clock = Arc::new(move || *clock.lock().unwrap());
+        (runtime, now)
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_rejects_a_late_ready_token_response() {
+        let (mut runtime, now) = advancing_runtime();
+        let started = *now.lock().unwrap();
+        runtime.transport = Arc::new(LateTokenTransport(now, Duration::from_secs(2)));
+        let outcome = DeviceCodeGrant
+            .poll(
+                &runtime,
+                &authorization(),
+                &LoginCallbacks::default(),
+                Duration::from_secs(2),
+                started,
+            )
+            .await;
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.polls_made, 1);
+        assert_eq!(outcome.1.elapsed, Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_callback_does_not_count_an_unsent_request() {
+        let (runtime, now) = advancing_runtime();
+        let started = *now.lock().unwrap();
+        let callbacks = LoginCallbacks {
+            on_poll: Some(Arc::new(move |event| {
+                assert_eq!(event.attempt, 1);
+                *now.lock().unwrap() += Duration::from_secs(2);
+            })),
+            ..Default::default()
+        };
+        let outcome = DeviceCodeGrant
+            .poll(
+                &runtime,
+                &authorization(),
+                &callbacks,
+                Duration::from_secs(2),
+                started,
+            )
+            .await;
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(
+            outcome.1.polls_made, 0,
+            "no transport was polled after the callback exhausted the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_rejects_success_after_slow_parse_hook() {
+        let (mut runtime, now) = advancing_runtime();
+        let started = *now.lock().unwrap();
+        runtime.transport = Arc::new(LateTokenTransport(now.clone(), Duration::ZERO));
+        runtime.config.hooks.parse_response = Some(Arc::new(move |_, _, _, _| {
+            *now.lock().unwrap() += Duration::from_secs(2);
+            None
+        }));
+        let outcome = DeviceCodeGrant
+            .poll(
+                &runtime,
+                &authorization(),
+                &LoginCallbacks::default(),
+                Duration::from_secs(2),
+                started,
+            )
+            .await;
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.elapsed, Duration::from_secs(3));
+    }
+
+    struct YieldingTokenTransport {
+        fail_first: bool,
+        attempts: std::sync::atomic::AtomicUsize,
+        expire_clock: Option<Arc<std::sync::Mutex<Instant>>>,
+    }
+
+    #[async_trait]
+    impl crate::auth::transport::HttpTransport for YieldingTokenTransport {
+        async fn post(
+            &self,
+            url: &str,
+            _headers: &HashMap<String, String>,
+            _body: crate::auth::transport::RequestBody,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            if url.ends_with("/device") {
+                return Ok(HttpResponse { status: 200, content_type: Some("application/json".into()),
+                    body: r#"{"device_code":"dc","user_code":"uc","verification_uri":"https://example.com/device","expires_in":600,"interval":5}"#.into() });
+            }
+            let mut yielded = false;
+            poll_fn(|cx| {
+                if !yielded {
+                    yielded = true;
+                    if let Some(clock) = &self.expire_clock {
+                        *clock.lock().unwrap() += Duration::from_secs(600);
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
+            let attempt = self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_first && attempt == 0 {
+                return Err(crate::auth::transport::TransportError::new(
+                    "transient failure",
+                ));
+            }
+            Ok(HttpResponse {
+                status: 200,
+                content_type: Some("application/json".into()),
+                body: r#"{"access_token":"valid"}"#.into(),
+            })
+        }
+        async fn get(
+            &self,
+            _url: &str,
+            _headers: &HashMap<String, String>,
+        ) -> Result<HttpResponse, crate::auth::transport::TransportError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn test_yielding_token_request_does_not_consume_poll_sleep_budget() {
+        for fail_first in [false, true] {
+            let (mut runtime, _) = advancing_runtime();
+            let delays = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = delays.clone();
+            let original_sleep = runtime.sleep.clone();
+            runtime.sleep = Arc::new(move |duration| {
+                recorded.lock().unwrap().push(duration);
+                original_sleep(duration)
+            });
+            runtime.transport = Arc::new(YieldingTokenTransport {
+                fail_first,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+                expire_clock: None,
+            });
+            // The injected executor, clock and polling sleep are public seams:
+            // a transport may legitimately return Pending before it is ready.
+            let (result, summary) = futures::executor::block_on(
+                DeviceCodeGrant.run(&runtime, &LoginCallbacks::default()),
+            );
+            assert!(
+                result.is_ok(),
+                "yielding must not change a valid result: {result:?}"
+            );
+            let count = if fail_first { 2 } else { 1 };
+            assert_eq!(summary.polls_made, count);
+            assert_eq!(summary.elapsed, Duration::from_secs(5 * u64::from(count)));
+            assert_eq!(
+                *delays.lock().unwrap(),
+                vec![Duration::from_secs(5); count as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn test_yielding_request_observes_injected_clock_expiry_without_extra_sleep() {
+        let (mut runtime, now) = advancing_runtime();
+        let delays = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = delays.clone();
+        let original_sleep = runtime.sleep.clone();
+        runtime.sleep = Arc::new(move |duration| {
+            recorded.lock().unwrap().push(duration);
+            original_sleep(duration)
+        });
+        runtime.transport = Arc::new(YieldingTokenTransport {
+            fail_first: false,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            expire_clock: Some(now),
+        });
+        let (result, summary) =
+            futures::executor::block_on(DeviceCodeGrant.run(&runtime, &LoginCallbacks::default()));
+        assert!(matches!(
+            result,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(summary.elapsed, Duration::from_secs(605));
+        assert_eq!(*delays.lock().unwrap(), vec![Duration::from_secs(5)]);
+    }
+
+    #[tokio::test]
+    async fn test_poll_deadline_includes_request_transform_time_before_transmission() {
+        let (mut runtime, now) = advancing_runtime();
+        let started = *now.lock().unwrap();
+        runtime.config.hooks.transform_request = Some(Arc::new(move |_, params, headers| {
+            *now.lock().unwrap() += Duration::from_secs(2);
+            (params, headers)
+        }));
+        let (result, summary) = DeviceCodeGrant
+            .poll(
+                &runtime,
+                &authorization(),
+                &LoginCallbacks::default(),
+                Duration::from_secs(2),
+                started,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(
+            summary.polls_made, 0,
+            "a transform that exhausts the budget must prevent transmission"
+        );
+        assert_eq!(summary.elapsed, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_http_watchdog_drops_pending_work_without_a_tokio_runtime() {
+        let (runtime, dropped) = pending_runtime(Arc::new(|_| Box::pin(async {})));
+        let authorization = authorization();
+        let callbacks = LoginCallbacks::default();
+        let poll = DeviceCodeGrant.poll(
+            &runtime,
+            &authorization,
+            &callbacks,
+            Duration::from_millis(20),
+            Instant::now(),
+        );
+        let guard = futures_timer::Delay::new(Duration::from_millis(250));
+        let outcome = match futures::executor::block_on(futures::future::select(Box::pin(poll), Box::pin(guard))) {
+            futures::future::Either::Left((outcome, _)) => outcome,
+            futures::future::Either::Right(_) => panic!("the runtime-independent HTTP watchdog must interrupt a permanently pending transport"),
+        };
+        assert!(matches!(
+            outcome.0,
+            Err(DeviceAuthError::AuthorizationExpired(
+                ExpiryCause::DeadlineElapsed
+            ))
+        ));
+        assert_eq!(outcome.1.polls_made, 1);
+        assert!(outcome.1.elapsed >= Duration::from_millis(20));
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the deadline must drop owned transport work on a non-Tokio executor"
+        );
     }
 
     #[test]

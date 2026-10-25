@@ -382,6 +382,22 @@ impl DeviceAuthConfig {
         crate::auth::store::store_key(&issuer, &self.client_id)
     }
 
+    /// Use the same configured HTTP transport for discovery and login.
+    pub(crate) fn transport(&self) -> Result<SharedTransport, DeviceAuthError> {
+        if let Some(transport) = &self.hooks.http_client {
+            return Ok(transport.clone());
+        }
+        match self.http_timeout_seconds {
+            Some(seconds) if seconds.is_finite() && seconds > 0.0 => Ok(Arc::new(
+                ReqwestTransport::with_timeout(std::time::Duration::from_secs_f64(seconds))
+                    .map_err(|error| {
+                        DeviceAuthError::Config(format!("failed to build HTTP client: {error}"))
+                    })?,
+            )),
+            _ => Ok(Arc::new(ReqwestTransport::default())),
+        }
+    }
+
     /// Resolve endpoints from the issuer's well-known metadata document.
     ///
     /// Network I/O, and therefore an explicit step: never a hidden fetch
@@ -411,10 +427,7 @@ impl DeviceAuthConfig {
             )
         })?;
 
-        let transport: SharedTransport = match &self.hooks.http_client {
-            Some(client) => client.clone(),
-            None => Arc::new(ReqwestTransport::default()),
-        };
+        let transport = self.transport()?;
         self.discover_with(transport.as_ref(), issuer).await
     }
 

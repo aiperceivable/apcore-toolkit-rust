@@ -4,12 +4,16 @@
 // requests to a running web API. Feature-gated behind `http-proxy`.
 
 use std::collections::{HashMap, HashSet};
+use std::future::{poll_fn, Future};
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tracing::{debug, warn};
 
+use apcore::cancel::CancelToken;
 use apcore::context::Context;
 use apcore::errors::ModuleError;
 use apcore::module::Module;
@@ -298,7 +302,20 @@ impl Module for ProxyModule {
     async fn execute(
         &self,
         inputs: serde_json::Value,
-        _ctx: &Context<serde_json::Value>,
+        ctx: &Context<serde_json::Value>,
+    ) -> Result<serde_json::Value, ModuleError> {
+        match ctx.cancel_token.as_ref() {
+            Some(token) => execute_cancellable(self.forward(inputs, Some(token)), token).await,
+            None => self.forward(inputs, None).await,
+        }
+    }
+}
+
+impl ProxyModule {
+    async fn forward(
+        &self,
+        inputs: serde_json::Value,
+        token: Option<&CancelToken>,
     ) -> Result<serde_json::Value, ModuleError> {
         let mut path_param_values: HashMap<&str, String> = HashMap::new();
         let mut query: HashMap<String, String> = HashMap::new();
@@ -383,27 +400,38 @@ impl Module for ProxyModule {
             request = request.json(&body);
         }
 
-        let resp = request.send().await.map_err(|e| {
-            ModuleError::new(
-                apcore::errors::ErrorCode::ModuleExecuteError,
-                format!("HTTP request failed: {e}"),
-            )
-        })?;
-
+        // A synchronous auth factory may itself cancel the Context. Check
+        // after it returns so no HTTP work starts for that cancelled request.
+        if let Some(token) = token {
+            token.check()?;
+        }
+        let resp = request
+            .send()
+            .await
+            .map_err(|error| http_error(error, "sending request"))?;
         let status = resp.status();
+        if status.as_u16() == 204 {
+            return Ok(serde_json::json!({}));
+        }
+        // Both body paths stay inside the cancellable request future and
+        // reqwest's total timeout. Preserve text charset decoding for errors.
         if status.is_success() {
-            if status.as_u16() == 204 {
-                return Ok(serde_json::json!({}));
-            }
-            resp.json().await.map_err(|e| {
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|error| http_error(error, "reading response body"))?;
+            serde_json::from_slice(&body).map_err(|error| {
                 ModuleError::new(
                     apcore::errors::ErrorCode::ModuleExecuteError,
-                    format!("Failed to parse response JSON: {e}"),
+                    format!("Failed to parse response JSON: {error}"),
                 )
             })
         } else {
-            let error_text = resp.text().await.unwrap_or_default();
-            let message = extract_error_message(&error_text);
+            let text = resp
+                .text()
+                .await
+                .map_err(|error| http_error(error, "reading response body"))?;
+            let message = extract_error_message(&text);
             Err(ModuleError::new(
                 apcore::errors::ErrorCode::ModuleExecuteError,
                 format!("HTTP {}: {}", status.as_u16(), message),
@@ -412,10 +440,74 @@ impl Module for ProxyModule {
     }
 }
 
+async fn execute_cancellable<F>(
+    request: F,
+    token: &CancelToken,
+) -> Result<serde_json::Value, ModuleError>
+where
+    F: Future<Output = Result<serde_json::Value, ModuleError>>,
+{
+    token.check()?;
+    let mut request = std::pin::pin!(request);
+    // Core tokens expose cooperative checks rather than a wakeable future.
+    // No background task survives: dropping this scope drops the HTTP work
+    // and its polling timer together.
+    let mut tick = std::pin::pin!(tokio::time::sleep(Duration::ZERO));
+    poll_fn(|cx| {
+        if let Err(error) = token.check() {
+            return Poll::Ready(Err(error.into()));
+        }
+        if let Poll::Ready(result) = request.as_mut().poll(cx) {
+            // Synchronous work inside the future can cancel before returning
+            // Ready; cancellation wins over a simultaneous HTTP result.
+            if let Err(error) = token.check() {
+                return Poll::Ready(Err(error.into()));
+            }
+            return Poll::Ready(result);
+        }
+        if tick.as_mut().poll(cx).is_ready() {
+            tick.as_mut()
+                .reset(tokio::time::Instant::now() + Duration::from_millis(10));
+            let _ = tick.as_mut().poll(cx);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+fn http_error(error: reqwest::Error, operation: &str) -> ModuleError {
+    let message = if error.is_timeout() {
+        format!("HTTP request timed out while {operation}: {error}")
+    } else {
+        format!("HTTP request failed while {operation}: {error}")
+    };
+    ModuleError::new(apcore::errors::ErrorCode::ModuleExecuteError, message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn test_cancellation_wins_over_a_simultaneously_ready_result() {
+        for succeed in [true, false] {
+            let token = CancelToken::new();
+            let future = async {
+                token.cancel();
+                if succeed {
+                    Ok(json!({}))
+                } else {
+                    Err(ModuleError::new(
+                        apcore::errors::ErrorCode::ModuleExecuteError,
+                        "HTTP failure",
+                    ))
+                }
+            };
+            let error = execute_cancellable(future, &token).await.unwrap_err();
+            assert_eq!(error.code, apcore::errors::ErrorCode::ExecutionCancelled);
+        }
+    }
 
     #[test]
     fn test_new_rejects_non_http_scheme() {
