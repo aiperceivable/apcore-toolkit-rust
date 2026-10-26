@@ -312,6 +312,7 @@ impl Module for ProxyModule {
 }
 
 impl ProxyModule {
+    #[allow(clippy::result_large_err)] // Preserve the shared ModuleError boundary.
     async fn forward(
         &self,
         inputs: serde_json::Value,
@@ -440,6 +441,7 @@ impl ProxyModule {
     }
 }
 
+#[allow(clippy::result_large_err)] // Preserve the shared ModuleError boundary.
 async fn execute_cancellable<F>(
     request: F,
     token: &CancelToken,
